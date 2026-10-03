@@ -1,0 +1,30 @@
+[package]
+name = "latent-atlas"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Behavioral cartography for language models: temporal-interval benchmarks and latent world-model maps"
+
+[dependencies]
+anyhow = "1.0.104"
+arrow = "60.0.0"
+async-trait = "0.1.92"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+csv = "1.4.0"
+futures = "0.3.34"
+image = "0.25.10"
+parquet = { version = "60.0.0", features = ["arrow"] }
+rand = "0.10.3"
+rand_chacha = "0.10.0"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[[bin]]
+name = "atlas"
+path = "src/main.rs"
