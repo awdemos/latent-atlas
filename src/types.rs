@@ -131,7 +131,11 @@ pub struct Interval {
     pub end_year: Option<i32>,
     pub start_precision: YearPrecision,
     pub end_precision: YearPrecision,
+    /// Preserved for source fidelity / future use; v0 labeling always
+    /// treats bounds as inclusive (see `label_at`).
     pub start_inclusive: bool,
+    /// Preserved for source fidelity / future use; v0 labeling always
+    /// treats bounds as inclusive (see `label_at`).
     pub end_inclusive: bool,
     pub confidence: Confidence,
     pub date_basis: String,
@@ -141,6 +145,9 @@ pub struct Interval {
 
 impl Interval {
     /// Three-valued label honoring bounds, open-endedness, and precision.
+    /// Years within `ambiguity_window()` of a bound are `UnknownOrAmbiguous`
+    /// on EITHER side of that bound, including years strictly inside the
+    /// interval. Bounds are always treated as inclusive in v0.
     pub fn label_at(&self, year: i32) -> GoldLabel {
         if let Some(a) = self.start_year
             && (year - a).abs() < self.start_precision.ambiguity_window()
@@ -166,10 +173,14 @@ impl Interval {
         }
     }
 
+    /// Midpoint year (`world_end` substitutes for a missing end bound);
+    /// `None` when the start bound is missing. Computed in i64 so extreme
+    /// years cannot overflow i32 in debug builds.
     pub fn midpoint(&self, world_end: i32) -> Option<i32> {
+        let mid = |a: i32, b: i32| (i64::from(a) + (i64::from(b) - i64::from(a)) / 2) as i32;
         match (self.start_year, self.end_year) {
-            (Some(a), Some(b)) => Some((a + b) / 2),
-            (Some(a), None) => Some((a + world_end) / 2),
+            (Some(a), Some(b)) => Some(mid(a, b)),
+            (Some(a), None) => Some(mid(a, world_end)),
             (None, _) => None,
         }
     }
@@ -198,6 +209,8 @@ pub struct Example {
     pub year_astronomical: i32,
     pub year_display: String,
     pub gold_label: GoldLabel,
+    /// Deliberate denormalization of `gold_label.label_int()` for flat
+    /// parquet/ML consumers; must stay in sync (enforced by constructors/querygen).
     pub label_int: u8,
     pub interval_start: Option<i32>,
     pub interval_end: Option<i32>,
@@ -345,6 +358,58 @@ mod tests {
         }
         for c in [Confidence::High, Confidence::Medium, Confidence::Low] {
             assert_eq!(Confidence::from_str(c.as_str()), Some(c));
+        }
+    }
+
+    #[test]
+    fn enum_serde_strings_match_as_str() {
+        // Variant lists are complete as of v0; update when adding variants.
+        for v in [
+            EntityType::Person,
+            EntityType::Event,
+            EntityType::Polity,
+            EntityType::Organization,
+            EntityType::Work,
+            EntityType::Technology,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
+        }
+        for v in [
+            Relation::Alive,
+            Relation::Ongoing,
+            Relation::Exists,
+            Relation::Active,
+            Relation::Available,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
+        }
+        for v in [
+            YearPrecision::Day,
+            YearPrecision::Month,
+            YearPrecision::Year,
+            YearPrecision::Decade,
+            YearPrecision::Century,
+            YearPrecision::Millennium,
+            YearPrecision::Approximate,
+            YearPrecision::Range,
+            YearPrecision::Unknown,
+        ] {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
+        }
+        for v in [Confidence::High, Confidence::Medium, Confidence::Low] {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
         }
     }
 }
