@@ -4,6 +4,7 @@
 use crate::model::ModelClient;
 use crate::store::read_ndjson;
 use crate::types::{Example, Response};
+use anyhow::Context;
 use futures::StreamExt;
 use std::collections::HashSet;
 use std::io::Write;
@@ -12,12 +13,23 @@ use std::time::Instant;
 
 /// Score every example not already in `out_path` and append denormalized
 /// responses as NDJSON; returns the number of rows written this run.
+///
+/// - Output order is nondeterministic (`buffer_unordered` completion order).
+/// - `concurrency` must be >= 1 (validated up front; 0 would hang forever).
+/// - Resume dedups on `example_id` only: pointing this at another model's
+///   response file will skip everything.
+/// - A kill mid-flush can leave a torn last line that `read_ndjson` rejects
+///   on the next resume; truncate the partial line manually and re-run.
 pub async fn run_probe(
     client: &dyn ModelClient,
     examples: Vec<Example>,
     out_path: &Path,
     concurrency: usize,
 ) -> anyhow::Result<usize> {
+    anyhow::ensure!(
+        concurrency >= 1,
+        "concurrency must be >= 1, got {concurrency}"
+    );
     let done: HashSet<String> = if out_path.exists() {
         read_ndjson::<Response>(out_path)?
             .into_iter()
@@ -34,12 +46,13 @@ pub async fn run_probe(
         return Ok(0);
     }
     if let Some(p) = out_path.parent() {
-        std::fs::create_dir_all(p)?;
+        std::fs::create_dir_all(p).with_context(|| format!("creating {}", p.display()))?;
     }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(out_path)?;
+        .open(out_path)
+        .with_context(|| format!("opening {}", out_path.display()))?;
     let mut file = std::io::BufWriter::new(file);
     let model = client.name().to_string();
     let mut written = 0usize;
@@ -52,7 +65,8 @@ pub async fn run_probe(
     .buffer_unordered(concurrency);
 
     while let Some((ex, score, latency_ms)) = stream.next().await {
-        let score = score?;
+        let score = score
+            .with_context(|| format!("scoring {} ({} written so far)", ex.example_id, written))?;
         let resp = Response {
             example: ex,
             model: model.clone(),
@@ -61,14 +75,18 @@ pub async fn run_probe(
             top_logprobs: score.top_logprobs,
             latency_ms,
         };
-        serde_json::to_writer(&mut file, &resp)?;
-        file.write_all(b"\n")?;
+        serde_json::to_writer(&mut file, &resp)
+            .with_context(|| format!("appending to {}", out_path.display()))?;
+        file.write_all(b"\n")
+            .with_context(|| format!("appending to {}", out_path.display()))?;
         written += 1;
         if written.is_multiple_of(100) {
-            file.flush()?;
+            file.flush()
+                .with_context(|| format!("flushing {}", out_path.display()))?;
         }
     }
-    file.flush()?;
+    file.flush()
+        .with_context(|| format!("flushing {}", out_path.display()))?;
     Ok(written)
 }
 
@@ -114,5 +132,41 @@ mod tests {
         let n = run_probe(&client, examples(), &out, 4).await.unwrap();
         assert_eq!(n, 0);
         assert_eq!(read_ndjson::<Response>(&out).unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn probe_rejects_zero_concurrency() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("responses.ndjson");
+        let client = MockClient::new("mock-v1");
+        let err = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_probe(&client, examples(), &out, 0),
+        )
+        .await
+        .expect("must not hang")
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("concurrency"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_resumes_mid_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("responses.ndjson");
+        let client = MockClient::new("mock-v1");
+        let all = examples();
+        let n = run_probe(&client, all[..6].to_vec(), &out, 4)
+            .await
+            .unwrap();
+        assert_eq!(n, 6);
+        let n = run_probe(&client, all, &out, 4).await.unwrap();
+        assert_eq!(n, 10);
+        let rows = read_ndjson::<Response>(&out).unwrap();
+        assert_eq!(rows.len(), 16);
+        let ids: HashSet<&str> = rows.iter().map(|r| r.example.example_id.as_str()).collect();
+        assert_eq!(ids.len(), 16);
     }
 }
