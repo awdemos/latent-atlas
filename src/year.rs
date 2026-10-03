@@ -1,14 +1,22 @@
 //! Astronomical year numbering: 1 BCE = 0, 2 BCE = -1, 100 BCE = -99.
 //! Internal i32 is always astronomical; prompts use BCE/CE display strings.
 
+/// Formats an astronomical year as a BCE/CE display string.
+/// Years <= 0 map to `1 - y` BCE (0 → "1 BCE", -99 → "100 BCE").
 pub fn display_year(y: i32) -> String {
     if y <= 0 {
-        format!("{} BCE", 1 - y)
+        format!("{} BCE", 1i64 - i64::from(y))
     } else {
         format!("{y} CE")
     }
 }
 
+/// Parses a BCE/CE display string back to an astronomical year.
+///
+/// Grammar: optional surrounding whitespace, an integer >= 1, and a
+/// case-sensitive `BCE` or `CE` suffix (whitespace between the number and
+/// the suffix is optional). Returns `None` for anything else, including a
+/// zero year ("0 BCE" / "0 CE").
 pub fn parse_display_year(s: &str) -> Option<i32> {
     let s = s.trim();
     if let Some(rest) = s.strip_suffix("BCE") {
@@ -47,7 +55,19 @@ mod tests {
     fn parse_rejects_garbage() {
         assert_eq!(parse_display_year("year 100"), None);
         assert_eq!(parse_display_year("0 BCE"), None);
+        assert_eq!(parse_display_year("0 CE"), None);
         assert_eq!(parse_display_year("3 CE 4"), None);
         assert_eq!(parse_display_year(""), None);
+    }
+
+    #[test]
+    fn display_handles_i32_min() {
+        assert_eq!(display_year(i32::MIN), "2147483649 BCE");
+    }
+
+    #[test]
+    fn parse_grammar_is_pinned() {
+        assert_eq!(parse_display_year("100BCE"), Some(-99));
+        assert_eq!(parse_display_year("100 bce"), None);
     }
 }
