@@ -2,7 +2,7 @@
 //! boundary-error histogram, calibration plot.
 
 use crate::metrics::boundary_error;
-use crate::types::{GoldLabel, Response};
+use crate::types::{GoldLabel, Relation, Response};
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Debug)]
 pub struct EntityCurve {
     pub name: String,
+    pub relation: Relation,
     pub subject_id: String,
     pub interval_start: Option<i32>,
     pub interval_end: Option<i32>,
@@ -46,6 +47,7 @@ pub fn curves_from_responses(responses: &[Response]) -> Vec<EntityCurve> {
             let first = rs[0];
             EntityCurve {
                 name: first.example.subject_name.clone(),
+                relation: first.example.relation,
                 subject_id: first.example.subject_id.clone(),
                 interval_start: first.example.interval_start,
                 interval_end: first.example.interval_end,
@@ -295,7 +297,14 @@ pub fn render_run(
             .max()
             .unwrap();
         for ec in curves.iter().take(max_curves) {
-            let p = out_dir.join(format!("curve_{}.svg", sanitize(&ec.name)));
+            // Keyed by relation:subject_id, so name alone can collide (same
+            // sanitized name, or one entity with several relations).
+            let p = out_dir.join(format!(
+                "curve_{}_{}_{}.svg",
+                sanitize(&ec.name),
+                ec.relation.as_str(),
+                sanitize(&ec.subject_id)
+            ));
             curve_svg(ec, (y0, y1), &p)?;
             written.push(p);
         }
@@ -419,7 +428,10 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into())
             .collect();
         assert!(names.contains(&"heatmap.png".to_string()));
-        assert!(names.iter().any(|n| n.starts_with("curve_")));
+        assert!(
+            names.contains(&"curve_Julius_Caesar_alive_wd_Q1048.svg".to_string()),
+            "curve filename carries relation + subject id: {names:?}"
+        );
         assert!(names.contains(&"boundary_error.svg".to_string()));
     }
 }
