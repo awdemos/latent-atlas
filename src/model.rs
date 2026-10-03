@@ -151,10 +151,23 @@ impl ModelClient for OpenAiClient {
             anyhow::bail!("chat/completions HTTP {status}: {json}");
         }
         let top = parse_chat_response(&json)?;
-        aggregate_yes_no(&top).ok_or_else(|| {
-            anyhow::anyhow!("Yes/No absent from top_logprobs for {}", example.example_id)
-        })
+        aggregate_yes_no(&top).ok_or_else(|| yes_no_absent_error(&example.example_id, &top))
     }
+}
+
+/// Builds the diagnostic for a probe whose top-logprobs contained neither
+/// "Yes" nor "No" — almost always a reasoning/thinking model whose chat
+/// template opens with a think-token, making single-token probing impossible
+/// at the first position.
+fn yes_no_absent_error(example_id: &str, top: &[(String, f64)]) -> anyhow::Error {
+    let observed: Vec<&str> = top.iter().map(|(t, _)| t.as_str()).take(8).collect();
+    anyhow::anyhow!(
+        "Yes/No absent from top_logprobs for {example_id} \
+         (observed top tokens: {observed:?}; if the model's first token is \
+         never Yes/No it is likely a reasoning/thinking model, which cannot \
+         be single-token probed — use a non-thinking model or an endpoint \
+         where thinking can be disabled, e.g. vLLM's chat_template_kwargs)"
+    )
 }
 
 #[cfg(test)]
@@ -228,5 +241,14 @@ mod tests {
         let a = client.score(&examples[0]).await.unwrap();
         let b = client.score(&examples[0]).await.unwrap();
         assert_eq!(a.p_yes, b.p_yes);
+    }
+
+    #[test]
+    fn yes_no_absent_error_lists_observed_tokens() {
+        let top = vec![("Thinking".to_string(), 0.0), ("Okay".to_string(), -6.5)];
+        let err = yes_no_absent_error("example_42", &top).to_string();
+        assert!(err.contains("example_42"), "{err}");
+        assert!(err.contains("Thinking"), "{err}");
+        assert!(err.contains("thinking model"), "{err}");
     }
 }
