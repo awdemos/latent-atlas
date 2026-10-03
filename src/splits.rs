@@ -1,6 +1,7 @@
 //! Deterministic splits via FNV-1a — stable across runs, platforms, and
 //! toolchain versions (unlike std's RandomState). No RNG state to preserve.
 
+/// FNV-1a 64-bit hash; exposed for pinning/reuse.
 pub fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for &b in bytes {
@@ -11,6 +12,8 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 /// 60% train / 20% dev / 20% test, entity-disjoint by construction.
+/// The split is a function of the exact id string — "Q42" and "wd:Q42"
+/// partition differently; callers must pass the canonical entity_id.
 pub fn entity_split(entity_id: &str) -> &'static str {
     match fnv1a64(entity_id.as_bytes()) % 10 {
         0..=5 => "train",
@@ -34,11 +37,11 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn split_is_deterministic() {
-        for i in 0..100 {
-            let id = format!("wd:Q{i}");
-            assert_eq!(entity_split(&id), entity_split(&id));
-        }
+    fn split_fixed_vectors_are_stable() {
+        assert_eq!(fnv1a64(b""), 0xcbf29ce484222325);
+        assert_eq!(entity_split("wd:Q1048"), "dev");
+        assert_eq!(entity_split("wd:Q42"), "dev");
+        assert_eq!(entity_split("wd:Q135000000"), "train");
     }
 
     #[test]
@@ -57,6 +60,13 @@ mod tests {
     fn holdout_template_always_lands_in_test() {
         for i in 0..100 {
             assert_eq!(example_split(&format!("wd:Q{i}"), true), "test");
+        }
+    }
+
+    #[test]
+    fn example_split_delegates_when_not_holdout() {
+        for id in ["wd:Q42", "wd:Q1048", "wd:Q135000000"] {
+            assert_eq!(example_split(id, false), entity_split(id));
         }
     }
 }
