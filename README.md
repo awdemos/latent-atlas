@@ -21,19 +21,20 @@ the Aeneid, the printing press, …) against a deterministic mock model and
 writes score maps to `atlas-data/runs/mock-atlas-v1/score_maps/`:
 
 - `heatmap.png` — entity × year probability field ("civilization bands")
-- `curve_<entity>.svg` — per-entity P(Yes) curves with the true interval shaded
+- `curve_<name>_<relation>_<subject_id>.svg` — per-entity P(Yes) curves with the
+  true interval shaded (e.g. `curve_Julius_Caesar_alive_fixture_caesar.svg`)
 - `boundary_error.svg` — how far the model's era boundaries drift, in years
 - `calibration.svg` — predicted vs empirical probabilities
 
 ## Pipeline
 
 ```bash
-atlas fetch --entity-type people --limit 10000   # Wikidata -> raw/ (resumable)
+atlas fetch --entity-type person --limit 10000    # Wikidata -> raw/ (resumable)
 atlas normalize                                  # raw/ -> canonical/*.parquet
 atlas generate --mode eval                       # canonical -> generated/*.ndjson
 atlas generate --mode sweep                      # dense year axis for rendering
 atlas split                                      # entity-level split tables
-atlas probe --input generated/alive_yesno.ndjson --model gpt-4o-mini
+atlas probe --input atlas-data/generated/alive_yesno.ndjson --model gpt-4o-mini
 atlas score --run atlas-data/runs/gpt-4o-mini
 atlas render --run atlas-data/runs/gpt-4o-mini
 ```
@@ -52,9 +53,13 @@ Use `--mock` on `probe` to dry-run without a model.
 ## Roman showcase panel
 
 Render the atlas over the curated Roman subset only (curated entity IDs carry
-the `curated:` prefix):
+the `curated:` prefix). The demo regenerates `generated/` from the bundled
+fixture only, so seed the curated CSV back into `raw/` and rebuild first:
 
 ```bash
+cp fixtures/curated_roman.csv atlas-data/raw/
+atlas normalize
+atlas generate --mode sweep
 grep 'curated:' atlas-data/generated/exists_yesno_sweep.ndjson > atlas-data/generated/roman_showcase.ndjson
 atlas probe --input atlas-data/generated/roman_showcase.ndjson --mock
 atlas render --run atlas-data/runs/mock
