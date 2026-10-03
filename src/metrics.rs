@@ -5,6 +5,8 @@ use crate::types::{GoldLabel, Response};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
+/// Fraction of rows where the thresholded prediction (P>=0.5) matches the
+/// gold label; 0.0 on empty input.
 pub fn accuracy(points: &[(f64, u8)]) -> f64 {
     if points.is_empty() {
         return 0.0;
@@ -16,6 +18,7 @@ pub fn accuracy(points: &[(f64, u8)]) -> f64 {
         / points.len() as f64
 }
 
+/// Mean squared error of p_yes against the 0/1 label; 0.0 on empty input.
 pub fn brier(points: &[(f64, u8)]) -> f64 {
     if points.is_empty() {
         return 0.0;
@@ -27,6 +30,8 @@ pub fn brier(points: &[(f64, u8)]) -> f64 {
         / points.len() as f64
 }
 
+/// Mean binary cross-entropy, probabilities clamped to [1e-15, 1-1e-15];
+/// 0.0 on empty input.
 pub fn log_loss(points: &[(f64, u8)]) -> f64 {
     if points.is_empty() {
         return 0.0;
@@ -102,7 +107,9 @@ pub fn smoothness(curve: &[(i32, f64)]) -> f64 {
         / (curve.len() - 1) as f64
 }
 
-/// IoU between the predicted-active year span (P>=0.5) and the true interval.
+/// IoU between the predicted-active year span (P>=0.5) and the true interval;
+/// span-based (min/max of predicted-active years); pair with smoothness for
+/// hole detection.
 pub fn interval_iou(curve: &[(i32, f64)], a: i32, b: Option<i32>, world_end: i32) -> f64 {
     let b = b.unwrap_or(world_end);
     let pred: Vec<i32> = curve
@@ -118,6 +125,8 @@ pub fn interval_iou(curve: &[(i32, f64)], a: i32, b: Option<i32>, world_end: i32
     inter / union
 }
 
+/// Classification metrics for one slice of eval rows; unknown-labeled rows
+/// are counted in `n_excluded_unknown` and excluded from `n` and the metrics.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct GroupMetrics {
     pub n: usize,
@@ -128,6 +137,8 @@ pub struct GroupMetrics {
     pub brier: f64,
 }
 
+/// Full report for one model: overall and grouped classification metrics
+/// plus per-interval curve means (boundary error, IoU, smoothness).
 #[derive(Clone, Debug, Serialize)]
 pub struct MetricsReport {
     pub model: String,
@@ -161,6 +172,7 @@ fn group_metrics(rs: &[&Response]) -> GroupMetrics {
     }
 }
 
+/// Partition rows by `key` and compute `GroupMetrics` per partition.
 fn group_by<'a>(
     rs: &[&'a Response],
     key: impl Fn(&'a Response) -> String,
@@ -175,8 +187,11 @@ fn group_by<'a>(
         .collect()
 }
 
-pub fn compute_report(responses: &[Response]) -> MetricsReport {
-    let world_end = 2026;
+/// Aggregate probe responses into a single-model metrics report. `world_end`
+/// should match the `GenConfig` used at generation time. The model name is
+/// taken from the first row: responses for one report must come from a
+/// single-model probe file.
+pub fn compute_report(responses: &[Response], world_end: i32) -> MetricsReport {
     let eval: Vec<&Response> = responses
         .iter()
         .filter(|r| r.example.split != "sweep")
@@ -186,26 +201,48 @@ pub fn compute_report(responses: &[Response]) -> MetricsReport {
         .map(|r| r.model.clone())
         .unwrap_or_default();
 
-    // Per-entity curves (sweep included) for boundary/IoU/smoothness.
-    let mut by_entity: BTreeMap<&str, Vec<&Response>> = BTreeMap::new();
+    // Per-interval curves (sweep included) for boundary/IoU/smoothness.
+    // relation + entity identifies one interval (normalize's interval_id
+    // scheme), so an entity with several relations gets separate curves.
+    let mut by_interval: BTreeMap<String, Vec<&Response>> = BTreeMap::new();
     for r in responses {
-        by_entity
-            .entry(r.example.subject_id.as_str())
+        by_interval
+            .entry(format!(
+                "{}:{}",
+                r.example.relation.as_str(),
+                r.example.subject_id
+            ))
             .or_default()
             .push(r);
     }
     let (mut se, mut ee, mut ious, mut smooth) = (vec![], vec![], vec![], vec![]);
-    for rs in by_entity.values() {
-        let mut curve: Vec<(i32, f64)> = rs
+    for rs in by_interval.values() {
+        let mut curve: Vec<(i32, bool, f64)> = rs
             .iter()
-            .map(|r| (r.example.year_astronomical, r.p_yes))
+            .map(|r| {
+                (
+                    r.example.year_astronomical,
+                    r.example.split != "sweep",
+                    r.p_yes,
+                )
+            })
             .collect();
-        curve.sort_by_key(|(y, _)| *y);
-        curve.dedup_by_key(|(y, _)| *y);
+        // Sweep rows win year-ties by construction: (year, is_eval) sorts
+        // sweep rows before eval rows at equal years (false < true), and the
+        // stable sort + dedup keeps the first row at each year regardless of
+        // probe output order.
+        curve.sort_by_key(|(y, is_eval, _)| (*y, *is_eval));
+        curve.dedup_by_key(|(y, _, _)| *y);
+        let curve: Vec<(i32, f64)> = curve.into_iter().map(|(y, _, p)| (y, p)).collect();
         let first = rs[0];
         let (Some(a), b) = (first.example.interval_start, first.example.interval_end) else {
             continue;
         };
+        if let Some(b_end) = b
+            && a > b_end
+        {
+            continue;
+        }
         if let Some((s, e)) = boundary_error(&curve, a, b, world_end) {
             se.push(s as f64);
             ee.push(e as f64);
@@ -319,12 +356,126 @@ mod tests {
             .collect();
         // force one row unknown to check exclusion
         responses[0].example.gold_label = GoldLabel::UnknownOrAmbiguous;
-        let report = compute_report(&responses);
+        let report = compute_report(&responses, 2026);
         assert_eq!(report.model, "m");
         assert_eq!(report.overall.n, 7);
         assert_eq!(report.overall.n_excluded_unknown, 1);
         assert!(report.by_relation.contains_key("alive"));
         assert!(report.by_band.contains_key("interior"));
         assert!(report.mean_interval_iou > 0.0);
+    }
+
+    #[test]
+    fn auroc_mid_value() {
+        // 3 of 4 pos/neg pairs concordant (0.4 loses only to 0.6).
+        let pts = vec![(0.9, 1u8), (0.4, 1), (0.6, 0), (0.1, 0)];
+        assert_eq!(auroc(&pts), Some(0.75));
+    }
+
+    #[test]
+    fn report_is_deterministic_under_input_order() {
+        use crate::querygen::{GenConfig, gen_eval, gen_sweep};
+        use crate::types::tests_helpers::caesar_interval;
+        use crate::types::*;
+        // sweep_step 1 makes the sweep cover every year, so every eval year
+        // collides with a sweep row regardless of the RNG-seeded eval years.
+        let cfg = GenConfig {
+            sweep_step: 1,
+            ..Default::default()
+        };
+        let iv = caesar_interval();
+        // Sweep and eval rows deliberately use different p scales, so at a
+        // year-tie the surviving row changes the curve unless ties break
+        // deterministically (sweep wins by construction).
+        let in_interval = |y: i32| (-99..=-43).contains(&y);
+        let mk = |ex: Example, p: f64| Response {
+            p_yes: p,
+            logit_diff: 0.0,
+            top_logprobs: vec![],
+            model: "m".into(),
+            latency_ms: 1,
+            example: ex,
+        };
+        let sweep: Vec<Response> = gen_sweep(&iv, "Julius Caesar", &cfg)
+            .into_iter()
+            .map(|ex| {
+                let p = if in_interval(ex.year_astronomical) {
+                    0.9
+                } else {
+                    0.1
+                };
+                mk(ex, p)
+            })
+            .collect();
+        let eval: Vec<Response> = gen_eval(&iv, "Julius Caesar", &[], &cfg)
+            .into_iter()
+            .map(|ex| {
+                let p = if in_interval(ex.year_astronomical) {
+                    0.8
+                } else {
+                    0.2
+                };
+                mk(ex, p)
+            })
+            .collect();
+        let eval_then_sweep = [eval.clone(), sweep.clone()].concat();
+        let sweep_then_eval = [sweep, eval].concat();
+        let r1 = compute_report(&eval_then_sweep, 2026);
+        let r2 = compute_report(&sweep_then_eval, 2026);
+        assert_eq!(r1.mean_interval_iou, r2.mean_interval_iou);
+        assert_eq!(r1.mean_smoothness, r2.mean_smoothness);
+        assert_eq!(r1.mean_boundary_error_start, r2.mean_boundary_error_start);
+        assert_eq!(r1.mean_boundary_error_end, r2.mean_boundary_error_end);
+    }
+
+    #[test]
+    fn multi_interval_same_entity_separate_curves() {
+        use crate::querygen::{GenConfig, gen_sweep};
+        use crate::types::tests_helpers::caesar_interval;
+        use crate::types::*;
+        let cfg = GenConfig::default();
+        // Same entity, second relation with different bounds: one interval
+        // per (relation, entity), so the curves must not merge.
+        let alive = caesar_interval();
+        let exists = Interval {
+            interval_id: "exists:wd:Q1048".into(),
+            relation: Relation::Exists,
+            start_year: Some(-508),
+            end_year: Some(-26),
+            ..caesar_interval()
+        };
+        let sweep_responses = |iv: &Interval| -> Vec<Response> {
+            let (a, b) = (iv.start_year.unwrap(), iv.end_year.unwrap());
+            gen_sweep(iv, "Julius Caesar", &cfg)
+                .into_iter()
+                .map(|ex| {
+                    let y = ex.year_astronomical;
+                    Response {
+                        p_yes: if (a..=b).contains(&y) { 0.9 } else { 0.1 },
+                        logit_diff: 0.0,
+                        top_logprobs: vec![],
+                        model: "m".into(),
+                        latency_ms: 1,
+                        example: ex,
+                    }
+                })
+                .collect()
+        };
+        let responses = [sweep_responses(&alive), sweep_responses(&exists)].concat();
+        let report = compute_report(&responses, 2026);
+        assert!(report.mean_boundary_error_start.is_some());
+        // Expected mean = average of the two per-interval IoUs, each computed
+        // on its own curve and bounds; equality proves bounds weren't crossed.
+        let curve_of = |iv: &Interval| -> Vec<(i32, f64)> {
+            let (a, b) = (iv.start_year.unwrap(), iv.end_year.unwrap());
+            (cfg.sweep_from..=cfg.sweep_to)
+                .step_by(cfg.sweep_step as usize)
+                .map(|y| (y, if (a..=b).contains(&y) { 0.9 } else { 0.1 }))
+                .collect()
+        };
+        let expected = (interval_iou(&curve_of(&alive), -99, Some(-43), 2026)
+            + interval_iou(&curve_of(&exists), -508, Some(-26), 2026))
+            / 2.0;
+        assert_eq!(report.mean_interval_iou, expected);
     }
 }
