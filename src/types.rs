@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 macro_rules! string_enum {
     ($name:ident { $($variant:ident => $s:literal),+ $(,)? }) => {
+        // Plan-mandated API name (used by parquet_io and the CLI); would
+        // otherwise trip clippy::should_implement_trait vs std::str::FromStr.
+        #[allow(clippy::should_implement_trait)]
         impl $name {
             pub fn as_str(self) -> &'static str {
                 match self { $($name::$variant => $s),+ }
@@ -140,14 +143,12 @@ impl Interval {
     /// Three-valued label honoring bounds, open-endedness, and precision.
     pub fn label_at(&self, year: i32) -> GoldLabel {
         if let Some(a) = self.start_year
-            && year < a
-            && (a - year) < self.start_precision.ambiguity_window()
+            && (year - a).abs() < self.start_precision.ambiguity_window()
         {
             return GoldLabel::UnknownOrAmbiguous;
         }
         if let Some(b) = self.end_year
-            && year > b
-            && (year - b) < self.end_precision.ambiguity_window()
+            && (year - b).abs() < self.end_precision.ambiguity_window()
         {
             return GoldLabel::UnknownOrAmbiguous;
         }
@@ -269,8 +270,9 @@ mod tests {
             start_precision: YearPrecision::Century,
             ..caesar_interval()
         };
-        assert_eq!(iv.label_at(-104), GoldLabel::UnknownOrAmbiguous); // 5y from bound, window 50
-        assert_eq!(iv.label_at(-59), GoldLabel::Yes); // interior, far from bounds
+        assert_eq!(iv.label_at(-104), GoldLabel::UnknownOrAmbiguous); // 5y outside bound, window 50
+        assert_eq!(iv.label_at(-59), GoldLabel::UnknownOrAmbiguous); // 40y inside bound, still in fuzzy window
+        assert_eq!(iv.label_at(-45), GoldLabel::Yes); // interior, beyond the window
     }
 
     #[test]
