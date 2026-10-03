@@ -50,6 +50,16 @@ export ATLAS_MODEL="meta-llama/Meta-Llama-3.1-8B-Instruct"
 
 Use `--mock` on `probe` to dry-run without a model.
 
+Reasoning/thinking models open with a think-token, so Yes/No never reaches
+the first position. `ATLAS_ASSISTANT_PREFILL` pre-fills the assistant turn
+(e.g. `"Answer:"`), pinning the first generated token into answer position —
+required for models like Ollama's nimble or Qwen3.5 on endpoints where
+thinking cannot be disabled server-side:
+
+```bash
+export ATLAS_ASSISTANT_PREFILL="Answer:"
+```
+
 ## Roman showcase panel
 
 Render the atlas over the curated Roman subset only (curated entity IDs carry

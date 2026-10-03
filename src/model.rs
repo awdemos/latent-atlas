@@ -98,11 +98,15 @@ impl ModelClient for MockClient {
 }
 
 /// OpenAI-compatible backend: POST {base_url}/chat/completions with
-/// max_tokens=1, logprobs=true, top_logprobs=20.
+/// max_tokens=1, logprobs=true, top_logprobs=20. If `ATLAS_ASSISTANT_PREFILL`
+/// is set (e.g. "Answer:"), its text is sent as a pre-filled assistant turn,
+/// which pins the first generated token into answer position — required for
+/// reasoning/thinking models that would otherwise open with a think-token.
 pub struct OpenAiClient {
     base_url: String,
     api_key: String,
     model: String,
+    assistant_prefill: String,
     http: reqwest::Client,
 }
 
@@ -114,11 +118,32 @@ impl OpenAiClient {
         let model = model
             .or_else(|| std::env::var("ATLAS_MODEL").ok())
             .ok_or_else(|| anyhow::anyhow!("model required: pass --model or set ATLAS_MODEL"))?;
+        let assistant_prefill = std::env::var("ATLAS_ASSISTANT_PREFILL").unwrap_or_default();
         Ok(Self {
             base_url,
             api_key,
             model,
+            assistant_prefill,
             http: reqwest::Client::new(),
+        })
+    }
+
+    /// Builds the chat-completions request body for a probe prompt.
+    fn chat_body(&self, prompt: &str) -> serde_json::Value {
+        let mut messages = vec![serde_json::json!({"role": "user", "content": prompt})];
+        if !self.assistant_prefill.is_empty() {
+            messages.push(serde_json::json!({
+                "role": "assistant",
+                "content": self.assistant_prefill,
+            }));
+        }
+        serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": 1,
+            "temperature": 0,
+            "logprobs": true,
+            "top_logprobs": 20,
         })
     }
 }
@@ -130,14 +155,7 @@ impl ModelClient for OpenAiClient {
     }
 
     async fn score(&self, example: &Example) -> anyhow::Result<YesNoScore> {
-        let body = serde_json::json!({
-            "model": self.model,
-            "messages": [{"role": "user", "content": example.prompt}],
-            "max_tokens": 1,
-            "temperature": 0,
-            "logprobs": true,
-            "top_logprobs": 20,
-        });
+        let body = self.chat_body(&example.prompt);
         let resp = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
@@ -250,5 +268,35 @@ mod tests {
         assert!(err.contains("example_42"), "{err}");
         assert!(err.contains("Thinking"), "{err}");
         assert!(err.contains("thinking model"), "{err}");
+    }
+
+    fn test_client(prefill: &str) -> OpenAiClient {
+        OpenAiClient {
+            base_url: "http://localhost:1/v1".into(),
+            api_key: String::new(),
+            model: "test-model".into(),
+            assistant_prefill: prefill.into(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    #[test]
+    fn chat_body_omits_assistant_without_prefill() {
+        let body = test_client("").chat_body("prompt text");
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "prompt text");
+    }
+
+    #[test]
+    fn chat_body_includes_assistant_prefill() {
+        let body = test_client("Answer:").chat_body("prompt text");
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"], "Answer:");
+        assert_eq!(body["max_tokens"], 1);
+        assert_eq!(body["logprobs"], true);
     }
 }
