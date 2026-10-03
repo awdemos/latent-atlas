@@ -4,6 +4,7 @@
 pub mod normalize;
 pub mod parquet_io;
 pub mod source;
+pub mod splits;
 pub mod store;
 pub mod types;
 pub mod year;
