@@ -1,0 +1,19 @@
+entity_id,entity_type,canonical_name,aliases,description,relation,start_year,end_year,confidence,notes
+curated:romulus,person,Romulus,Romulus of Rome,Legendary founder and first king of Rome,alive,-770,-716,low,Legendary dates
+curated:caesar,person,Julius Caesar,Gaius Julius Caesar|Caesar,Roman general and dictator,alive,-99,-43,high,
+curated:augustus,person,Augustus,Octavian|Gaius Octavius,First Roman emperor,alive,-62,14,high,
+curated:nero,person,Nero,Nero Claudius Caesar,Roman emperor 54-68,alive,37,68,high,
+curated:trajan,person,Trajan,Marcus Ulpius Traianus,Roman emperor 98-117,alive,53,117,high,
+curated:marcus_aurelius,person,Marcus Aurelius,,Roman emperor and Stoic,alive,121,180,high,
+curated:constantine,person,Constantine the Great,Constantine I,Roman emperor 306-337,alive,272,337,high,
+curated:roman_kingdom,polity,Roman Kingdom,Regnum Romanum,Rome under kings,exists,-752,-508,medium,Conventional dates
+curated:roman_republic,polity,Roman Republic,Res Publica,Rome from 509 to 27 BCE,exists,-508,-26,high,
+curated:principate,polity,Principate,,Early imperial system,exists,-26,284,medium,
+curated:dominate,polity,Dominate,,Late imperial system,exists,284,641,medium,
+curated:western_roman_empire,polity,Western Roman Empire,,Western half after 395,exists,395,476,high,
+curated:byzantine_empire,polity,Byzantine Empire,Eastern Roman Empire,Eastern Roman state,exists,330,1453,high,
+curated:third_punic_war,event,Third Punic War,,Rome destroys Carthage,ongoing,-148,-145,high,
+curated:aeneid,work,Aeneid,,Epic by Virgil,available,-18,,medium,Open-ended
+curated:res_gestae,work,Res Gestae Divi Augusti,Res Gestae,Augustus' funerary inscription,available,14,,medium,Open-ended
+curated:meditations,work,Meditations,,Marcus Aurelius' notebooks,available,175,,medium,Open-ended
+curated:digest,work,Digest,Pandects,Justinian legal compilation,available,533,,high,Open-ended

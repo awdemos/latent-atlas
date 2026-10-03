@@ -31,7 +31,7 @@ pub enum EntityType {
 string_enum!(EntityType { Person => "person", Event => "event", Polity => "polity",
     Organization => "organization", Work => "work", Technology => "technology" });
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Relation {
     Alive,
