@@ -17,7 +17,7 @@ image = "0.25.10"
 parquet = { version = "60.0.0", features = ["arrow"] }
 rand = "0.10.3"
 rand_chacha = "0.10.0"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
