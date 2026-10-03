@@ -6,15 +6,22 @@
 
 use crate::store::read_ndjson;
 use crate::types::EntityType;
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+/// WDQS SPARQL endpoint used when no override is configured.
 pub const DEFAULT_ENDPOINT: &str = "https://query.wikidata.org/sparql";
 const USER_AGENT: &str =
     "latent-atlas/0.1 (https://vibecodingagency.com; research dataset builder)";
 
+/// One raw entity row as fetched from Wikidata: the normalized shape shared
+/// by all entity types (?item ?itemLabel ?itemDescription ?start
+/// ?startPrecision ?end ?endPrecision) plus the retrieval date. Date fields
+/// keep the raw time literal verbatim for provenance; missing optional
+/// values stay `None`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RawRow {
     pub item: String,
@@ -51,6 +58,10 @@ fn interval_pattern(instance: &str, p_start: &str, p_end: Option<&str>) -> Strin
     s
 }
 
+/// Build the paged SELECT query for one entity type, with the type's
+/// interval properties (birth/death, inception/dissolution, etc.) bound to
+/// the normalized raw shape. Results are ordered by ?item so OFFSET paging
+/// is stable across resume.
 pub fn entity_query(entity_type: EntityType, offset: usize, limit: usize) -> String {
     let pattern = match entity_type {
         EntityType::Person => interval_pattern("wd:Q5", "P569", Some("P570")),
@@ -81,6 +92,10 @@ fn bound<'a>(b: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     b.get(key)?.get("value")?.as_str()
 }
 
+/// Map a SPARQL JSON response to raw rows. Bindings without an `item` value
+/// are dropped; every kept row is stamped with `retrieved_at`. Returns an
+/// empty vec when the response has no `results.bindings` array — this is
+/// `fetch_all`'s termination signal.
 pub fn parse_bindings(json: &serde_json::Value, retrieved_at: &str) -> Vec<RawRow> {
     let Some(rows) = json
         .get("results")
@@ -105,6 +120,8 @@ pub fn parse_bindings(json: &serde_json::Value, retrieved_at: &str) -> Vec<RawRo
         .collect()
 }
 
+/// Rate-limited WDQS client: one HTTP client, an endpoint, and the minimum
+/// delay between requests (and backoff unit on retries).
 pub struct SparqlClient {
     http: reqwest::Client,
     endpoint: String,
@@ -118,6 +135,7 @@ impl Default for SparqlClient {
 }
 
 impl SparqlClient {
+    /// Client targeting [`DEFAULT_ENDPOINT`], polite ~1 request/1.1s pacing.
     pub fn new() -> Self {
         Self {
             http: reqwest::Client::new(),
@@ -126,6 +144,8 @@ impl SparqlClient {
         }
     }
 
+    /// GET one page of results as SPARQL JSON, retrying transient failures
+    /// and non-2xx statuses with linear backoff; gives up after 4 attempts.
     pub async fn fetch_page(&self, query: &str) -> anyhow::Result<serde_json::Value> {
         let mut attempt = 0u32;
         loop {
@@ -161,6 +181,8 @@ impl SparqlClient {
 
     /// Fetch up to `limit` rows into `raw_path` (NDJSON). Resumable: the
     /// existing line count becomes the OFFSET of the next page.
+    /// One file per entity type: offsets derive from line counts, so
+    /// `raw_path` must contain only rows of `entity_type`.
     pub async fn fetch_all(
         &self,
         entity_type: EntityType,
@@ -178,7 +200,8 @@ impl SparqlClient {
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(raw_path)?;
+            .open(raw_path)
+            .with_context(|| format!("appending to {}", raw_path.display()))?;
         let retrieved_at = chrono::Utc::now().format("%Y-%m-%d").to_string();
         let mut written = 0usize;
         while existing + written < limit {
@@ -193,8 +216,10 @@ impl SparqlClient {
             }
             let n = rows.len();
             for row in &rows {
-                serde_json::to_writer(&mut file, row)?;
-                file.write_all(b"\n")?;
+                serde_json::to_writer(&mut file, row)
+                    .with_context(|| format!("appending to {}", raw_path.display()))?;
+                file.write_all(b"\n")
+                    .with_context(|| format!("appending to {}", raw_path.display()))?;
             }
             written += n;
             if n < take {
@@ -208,20 +233,36 @@ impl SparqlClient {
             .unwrap_or_else(|| Path::new("."))
             .join("source_manifest.json");
         let mut manifest: serde_json::Value = if manifest_path.exists() {
-            serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)?
+            serde_json::from_str(
+                &std::fs::read_to_string(&manifest_path)
+                    .with_context(|| format!("reading {}", manifest_path.display()))?,
+            )
+            .with_context(|| format!("parsing {}", manifest_path.display()))?
         } else {
             serde_json::json!({"sources": []})
         };
         let entry = serde_json::json!({
             "entity_type": entity_type.as_str(),
-            "file": raw_path.file_name().unwrap().to_string_lossy(),
+            "file": raw_path
+                .file_name()
+                .ok_or_else(|| anyhow::anyhow!("{}: no file name", raw_path.display()))?
+                .to_string_lossy(),
             "rows_total": existing + written,
             "last_fetch": retrieved_at,
         });
-        let sources = manifest["sources"].as_array_mut().unwrap();
+        let sources = manifest
+            .get_mut("sources")
+            .and_then(|s| s.as_array_mut())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}: malformed manifest, expected object with a \"sources\" array",
+                    manifest_path.display()
+                )
+            })?;
         sources.retain(|s| s["entity_type"] != entry["entity_type"]);
         sources.push(entry);
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)?;
+        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
+            .with_context(|| format!("writing {}", manifest_path.display()))?;
         Ok(written)
     }
 }
@@ -271,5 +312,46 @@ mod tests {
         assert_eq!(r.start_precision.as_deref(), Some("11"));
         assert_eq!(r.end, None);
         assert_eq!(r.retrieved_at, "2026-10-02");
+    }
+
+    #[test]
+    fn parse_bindings_empty_response_is_empty_vec() {
+        // Empty result set is fetch_all's termination signal; pin it.
+        assert!(parse_bindings(&serde_json::json!({}), "2026-10-02").is_empty());
+    }
+
+    #[test]
+    fn parse_bindings_drops_binding_without_item() {
+        let json = serde_json::json!({"results": {"bindings": [
+            {"itemLabel": {"type": "literal", "value": "no item uri here"}},
+            {"item": {"type": "uri", "value": "http://www.wikidata.org/entity/Q5"}}
+        ]}});
+        let rows = parse_bindings(&json, "2026-10-02");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].item, "http://www.wikidata.org/entity/Q5");
+    }
+
+    #[test]
+    fn query_work_and_technology_have_no_end_property() {
+        assert!(!entity_query(EntityType::Work, 0, 10).contains("OPTIONAL"));
+        assert!(!entity_query(EntityType::Technology, 0, 10).contains("OPTIONAL"));
+    }
+
+    #[test]
+    fn query_orders_by_item_for_stable_resume() {
+        for t in [
+            EntityType::Person,
+            EntityType::Event,
+            EntityType::Polity,
+            EntityType::Organization,
+            EntityType::Work,
+            EntityType::Technology,
+        ] {
+            let q = entity_query(t, 0, 10);
+            assert!(
+                q.contains("ORDER BY ?item"),
+                "resume needs stable order: {q}"
+            );
+        }
     }
 }
