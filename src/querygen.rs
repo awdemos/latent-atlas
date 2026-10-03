@@ -213,8 +213,15 @@ fn make_example(iv: &Interval, name: &str, year: i32, band: &str, tpl: &Template
 /// Eight stratified eval examples for one interval: interior, near/far
 /// bands around the bounds, plus one era-confusable (or far fallback) date.
 /// Open-ended intervals reallocate the after-bands into interior and
-/// near_before. Empty for intervals with no start bound.
+/// near_before. Empty for intervals with no start bound; inverted
+/// intervals (start > end, which `normalize` does not reject) also yield
+/// no examples rather than panicking in `jitter`'s clamp.
 pub fn gen_eval(iv: &Interval, name: &str, peers: &[&Interval], cfg: &GenConfig) -> Vec<Example> {
+    if let (Some(a), Some(b)) = (iv.start_year, iv.end_year)
+        && a > b
+    {
+        return vec![];
+    }
     let templates = templates_for(iv.relation);
     let mut rng = seeded_rng(cfg.seed, &iv.interval_id);
     let mut dated: Vec<(i32, &str)> = Vec::new();
@@ -277,7 +284,12 @@ pub fn gen_eval(iv: &Interval, name: &str, peers: &[&Interval], cfg: &GenConfig)
     dated
         .iter()
         .enumerate()
-        .map(|(i, (y, band))| make_example(iv, name, *y, band, templates[i % templates.len()]))
+        .map(|(i, (y, band))| {
+            // Slot suffix keeps ids unique when (template, band, year) collide.
+            let mut ex = make_example(iv, name, *y, band, templates[i % templates.len()]);
+            ex.example_id = format!("{}:{i}", ex.example_id);
+            ex
+        })
         .collect()
 }
 
@@ -297,7 +309,8 @@ pub fn gen_sweep(iv: &Interval, name: &str, cfg: &GenConfig) -> Vec<Example> {
 }
 
 /// Generate for every interval. Peers for era-confusable sampling are chosen
-/// among entities of the same entity_type.
+/// among entities of the same entity_type; peer lists are built once per
+/// type and skipped entirely in Sweep mode (gen_sweep ignores peers).
 pub fn generate(
     entities: &[Entity],
     intervals: &[Interval],
@@ -307,21 +320,35 @@ pub fn generate(
     use std::collections::HashMap;
     let by_id: HashMap<&str, &Entity> =
         entities.iter().map(|e| (e.entity_id.as_str(), e)).collect();
-    let type_of: HashMap<&str, EntityType> = entities
-        .iter()
-        .map(|e| (e.entity_id.as_str(), e.entity_type))
-        .collect();
+    let peers_by_type: HashMap<EntityType, Vec<&Interval>> = match mode {
+        GenMode::Eval => {
+            let type_of: HashMap<&str, EntityType> = entities
+                .iter()
+                .map(|e| (e.entity_id.as_str(), e.entity_type))
+                .collect();
+            let mut m: HashMap<EntityType, Vec<&Interval>> = HashMap::new();
+            for iv in intervals {
+                if let Some(t) = type_of.get(iv.entity_id.as_str()) {
+                    m.entry(*t).or_default().push(iv);
+                }
+            }
+            m
+        }
+        GenMode::Sweep => HashMap::new(),
+    };
     let mut out = Vec::new();
     for iv in intervals {
         let Some(entity) = by_id.get(iv.entity_id.as_str()) else {
             continue;
         };
-        let peers: Vec<&Interval> = intervals
-            .iter()
-            .filter(|o| type_of.get(o.entity_id.as_str()) == Some(&entity.entity_type))
-            .collect();
         match mode {
-            GenMode::Eval => out.extend(gen_eval(iv, &entity.canonical_name, &peers, cfg)),
+            GenMode::Eval => {
+                let peers = peers_by_type
+                    .get(&entity.entity_type)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                out.extend(gen_eval(iv, &entity.canonical_name, peers, cfg));
+            }
             GenMode::Sweep => out.extend(gen_sweep(iv, &entity.canonical_name, cfg)),
         }
     }
@@ -465,5 +492,97 @@ mod tests {
             assert!(e.prompt.contains("Julius Caesar"), "{}", e.prompt);
             assert!(!e.prompt.contains('{'), "{}", e.prompt);
         }
+    }
+
+    #[test]
+    fn inverted_interval_yields_no_examples() {
+        let mut iv = caesar_interval();
+        iv.start_year = Some(-43);
+        iv.end_year = Some(-99);
+        assert!(gen_eval(&iv, "Julius Caesar", &[], &cfg()).is_empty());
+    }
+
+    #[test]
+    fn point_interval_event_generates_8() {
+        let mut iv = caesar_interval();
+        iv.interval_id = "ongoing:wd:Q37839".into();
+        iv.relation = Relation::Ongoing;
+        iv.start_year = Some(1066);
+        iv.end_year = Some(1066);
+        let ex = gen_eval(&iv, "Battle of Hastings", &[], &cfg());
+        assert_eq!(ex.len(), 8);
+        for e in ex.iter().filter(|e| e.sample_band == "interior") {
+            assert_eq!(e.year_astronomical, 1066);
+            assert_eq!(e.gold_label, GoldLabel::Yes);
+        }
+    }
+
+    #[test]
+    fn missing_start_yields_no_examples() {
+        let iv = Interval {
+            start_year: None,
+            ..caesar_interval()
+        };
+        assert!(gen_eval(&iv, "Julius Caesar", &[], &cfg()).is_empty());
+    }
+
+    #[test]
+    fn far_fallback_when_near_world_end() {
+        let mut iv = caesar_interval();
+        iv.end_year = Some(2020);
+        let ex = gen_eval(&iv, "Julius Caesar", &[], &cfg());
+        let b = bands(&ex);
+        assert!(b.contains_key("far_fallback"));
+        assert!(!b.contains_key("far_after"));
+    }
+
+    #[test]
+    fn eval_example_ids_are_unique_per_interval() {
+        use std::collections::HashSet;
+        for (iv, name) in [
+            (aeneid_interval(), "Aeneid"),
+            (caesar_interval(), "Julius Caesar"),
+        ] {
+            let ex = gen_eval(&iv, name, &[], &cfg());
+            assert_eq!(ex.len(), 8);
+            let ids: HashSet<&str> = ex.iter().map(|e| e.example_id.as_str()).collect();
+            assert_eq!(ids.len(), 8, "{name}");
+        }
+    }
+
+    #[test]
+    fn generate_groups_peers_by_type_and_skips_missing() {
+        let caesar = caesar_entity(); // Person, wd:Q1048
+        let mut augustus = caesar_entity();
+        augustus.entity_id = "wd:Q945".into();
+        augustus.canonical_name = "Augustus".into();
+        let aeneid = aeneid_entity(); // Work
+
+        let caesar_iv = caesar_interval(); // alive, wd:Q1048, -99..=-43
+        let mut augustus_iv = caesar_interval();
+        augustus_iv.interval_id = "alive:wd:Q945".into();
+        augustus_iv.entity_id = "wd:Q945".into();
+        augustus_iv.start_year = Some(-62);
+        augustus_iv.end_year = Some(14);
+        let aeneid_iv = aeneid_interval();
+        let mut orphan_iv = caesar_interval();
+        orphan_iv.interval_id = "alive:wd:Q999".into();
+        orphan_iv.entity_id = "wd:Q999".into(); // no matching entity
+
+        let entities = [caesar, augustus, aeneid];
+        let intervals = [caesar_iv, augustus_iv, aeneid_iv, orphan_iv];
+        let out = generate(&entities, &intervals, &cfg(), GenMode::Eval);
+        assert!(out.iter().all(|e| e.subject_id != "wd:Q999"));
+        assert_eq!(out.len(), 24); // 3 resolvable intervals * 8
+        let era = |subject: &str, year: i32| {
+            out.iter().any(|e| {
+                e.subject_id == subject
+                    && e.sample_band == "era_confusable"
+                    && e.year_astronomical == year
+            })
+        };
+        // The two Person entities era-confuse each other at each other's midpoint.
+        assert!(era("wd:Q1048", (-62 + 14) / 2));
+        assert!(era("wd:Q945", -71)); // caesar midpoint
     }
 }
