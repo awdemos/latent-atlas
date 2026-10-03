@@ -237,25 +237,8 @@ pub struct Response {
 
 #[cfg(test)]
 mod tests {
+    use super::tests_helpers::*;
     use super::*;
-
-    pub(crate) fn caesar_interval() -> Interval {
-        Interval {
-            interval_id: "alive:wd:Q1048".into(),
-            entity_id: "wd:Q1048".into(),
-            relation: Relation::Alive,
-            start_year: Some(-99),
-            end_year: Some(-43),
-            start_precision: YearPrecision::Year,
-            end_precision: YearPrecision::Year,
-            start_inclusive: true,
-            end_inclusive: true,
-            confidence: Confidence::High,
-            date_basis: "birth_death".into(),
-            source_id: "wikidata:Q1048".into(),
-            notes: "Astronomical integer year convention used internally.".into(),
-        }
-    }
 
     #[test]
     fn label_at_interior_and_outside() {
@@ -410,6 +393,87 @@ mod tests {
                 serde_json::to_string(&v).unwrap(),
                 format!("\"{}\"", v.as_str())
             );
+        }
+    }
+}
+
+/// Shared fixtures for tests across modules (compiled only under cfg(test)).
+#[cfg(test)]
+pub mod tests_helpers {
+    use super::*;
+
+    pub fn caesar_entity() -> Entity {
+        Entity {
+            entity_id: "wd:Q1048".into(),
+            entity_type: EntityType::Person,
+            canonical_name: "Julius Caesar".into(),
+            aliases: vec!["Gaius Julius Caesar".into(), "Caesar".into()],
+            description: "Roman general, statesman, and dictator".into(),
+            language: "en".into(),
+            source_id: "wikidata:Q1048".into(),
+            source_url: "https://www.wikidata.org/wiki/Q1048".into(),
+        }
+    }
+
+    pub fn caesar_interval() -> Interval {
+        Interval {
+            interval_id: "alive:wd:Q1048".into(),
+            entity_id: "wd:Q1048".into(),
+            relation: Relation::Alive,
+            start_year: Some(-99),
+            end_year: Some(-43),
+            start_precision: YearPrecision::Year,
+            end_precision: YearPrecision::Year,
+            start_inclusive: true,
+            end_inclusive: true,
+            confidence: Confidence::High,
+            date_basis: "birth_death".into(),
+            source_id: "wikidata:Q1048".into(),
+            notes: "Astronomical integer year convention used internally.".into(),
+        }
+    }
+
+    pub fn aeneid_entity() -> Entity {
+        Entity {
+            entity_id: "wd:Q60272".into(),
+            entity_type: EntityType::Work,
+            canonical_name: "Aeneid".into(),
+            aliases: vec![],
+            description: "Latin epic poem by Virgil".into(),
+            language: "en".into(),
+            source_id: "wikidata:Q60272".into(),
+            source_url: "https://www.wikidata.org/wiki/Q60272".into(),
+        }
+    }
+
+    pub fn aeneid_interval() -> Interval {
+        Interval {
+            interval_id: "available:wd:Q60272".into(),
+            entity_id: "wd:Q60272".into(),
+            relation: Relation::Available,
+            start_year: Some(-18),
+            end_year: None,
+            start_precision: YearPrecision::Approximate,
+            end_precision: YearPrecision::Unknown,
+            start_inclusive: true,
+            end_inclusive: true,
+            confidence: Confidence::Medium,
+            date_basis: "publication".into(),
+            source_id: "wikidata:Q60272".into(),
+            notes: "Open-ended: still available.".into(),
+        }
+    }
+
+    pub fn caesar_provenance() -> Provenance {
+        Provenance {
+            entity_id: "wd:Q1048".into(),
+            field: "start_year".into(),
+            value: serde_json::json!(-99),
+            source_name: "Wikidata".into(),
+            source_id: "Q1048".into(),
+            retrieved_at: "2026-10-02".into(),
+            source_statement_id: None,
+            human_review_status: "unreviewed".into(),
         }
     }
 }
