@@ -3,6 +3,7 @@
 //! provenance `value` are stored as JSON strings in UTF-8 columns.
 
 use crate::types::{Confidence, Entity, EntityType, Interval, Provenance, Relation, YearPrecision};
+use anyhow::Context;
 use arrow::array::{Array, ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
@@ -21,37 +22,46 @@ fn strs(it: impl Iterator<Item = String>) -> ArrayRef {
 
 fn write_batch(path: &Path, batch: RecordBatch) -> anyhow::Result<()> {
     if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
+        std::fs::create_dir_all(p).with_context(|| format!("writing {}", path.display()))?;
     }
-    let file = File::create(path)?;
-    let mut writer = ArrowWriter::try_new(file, batch.schema(), None)?;
-    writer.write(&batch)?;
-    writer.close()?;
+    let file = File::create(path).with_context(|| format!("writing {}", path.display()))?;
+    let mut writer = ArrowWriter::try_new(file, batch.schema(), None)
+        .with_context(|| format!("writing {}", path.display()))?;
+    writer
+        .write(&batch)
+        .with_context(|| format!("writing {}", path.display()))?;
+    writer
+        .close()
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(())
 }
 
 fn read_batches(path: &Path) -> anyhow::Result<Vec<RecordBatch>> {
-    let file = File::open(path)?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)?.build()?;
-    Ok(reader.collect::<Result<Vec<_>, _>>()?)
+    let file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("reading {}", path.display()))?
+        .build()?;
+    reader
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| format!("reading {}", path.display()))
 }
 
-fn col_str(batch: &RecordBatch, i: usize) -> Vec<String> {
+fn col_str(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<String>> {
     let a = batch
         .column(i)
         .as_any()
         .downcast_ref::<StringArray>()
-        .expect("utf8 column");
-    (0..a.len()).map(|r| a.value(r).to_string()).collect()
+        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not utf8", path.display()))?;
+    Ok((0..a.len()).map(|r| a.value(r).to_string()).collect())
 }
 
-fn col_opt_str(batch: &RecordBatch, i: usize) -> Vec<Option<String>> {
+fn col_opt_str(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<Option<String>>> {
     let a = batch
         .column(i)
         .as_any()
         .downcast_ref::<StringArray>()
-        .expect("utf8 column");
-    (0..a.len())
+        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not utf8", path.display()))?;
+    Ok((0..a.len())
         .map(|r| {
             if a.is_null(r) {
                 None
@@ -59,33 +69,34 @@ fn col_opt_str(batch: &RecordBatch, i: usize) -> Vec<Option<String>> {
                 Some(a.value(r).to_string())
             }
         })
-        .collect()
+        .collect())
 }
 
-fn col_opt_i32(batch: &RecordBatch, i: usize) -> Vec<Option<i32>> {
+fn col_opt_i32(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<Option<i32>>> {
     let a = batch
         .column(i)
         .as_any()
         .downcast_ref::<Int32Array>()
-        .expect("i32 column");
-    (0..a.len())
+        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not i32", path.display()))?;
+    Ok((0..a.len())
         .map(|r| if a.is_null(r) { None } else { Some(a.value(r)) })
-        .collect()
+        .collect())
 }
 
-fn col_bool(batch: &RecordBatch, i: usize) -> Vec<bool> {
+fn col_bool(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<bool>> {
     let a = batch
         .column(i)
         .as_any()
         .downcast_ref::<BooleanArray>()
-        .expect("bool column");
-    (0..a.len()).map(|r| a.value(r)).collect()
+        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not bool", path.display()))?;
+    Ok((0..a.len()).map(|r| a.value(r)).collect())
 }
 
 fn parse_enum<T>(name: &str, s: &str, f: impl Fn(&str) -> Option<T>) -> anyhow::Result<T> {
     f(s).ok_or_else(|| anyhow::anyhow!("bad {name} value: {s:?}"))
 }
 
+/// Write entities to `path`; `entity_type` as UTF-8, `aliases` as a JSON string.
 pub fn write_entities(path: &Path, rows: &[Entity]) -> anyhow::Result<()> {
     let schema = Arc::new(Schema::new(vec![
         utf8("entity_id"),
@@ -113,13 +124,16 @@ pub fn write_entities(path: &Path, rows: &[Entity]) -> anyhow::Result<()> {
     write_batch(path, RecordBatch::try_new(schema, cols)?)
 }
 
+/// Read entities written by `write_entities`, reversing its encoding.
 // Column-major decode: the row index r walks all 8 column vectors at once,
 // so the range loop is clearer than any single-slice iteration.
 #[allow(clippy::needless_range_loop)]
 pub fn read_entities(path: &Path) -> anyhow::Result<Vec<Entity>> {
     let mut out = Vec::new();
     for batch in read_batches(path)? {
-        let c: Vec<Vec<String>> = (0..8).map(|i| col_str(&batch, i)).collect();
+        let c: Vec<Vec<String>> = (0..8)
+            .map(|i| col_str(&batch, i, path))
+            .collect::<anyhow::Result<Vec<_>>>()?;
         for r in 0..batch.num_rows() {
             out.push(Entity {
                 entity_id: c[0][r].clone(),
@@ -136,6 +150,7 @@ pub fn read_entities(path: &Path) -> anyhow::Result<Vec<Entity>> {
     Ok(out)
 }
 
+/// Write intervals to `path`; enums as UTF-8, years as nullable Int32.
 pub fn write_intervals(path: &Path, rows: &[Interval]) -> anyhow::Result<()> {
     let schema = Arc::new(Schema::new(vec![
         utf8("interval_id"),
@@ -178,17 +193,18 @@ pub fn write_intervals(path: &Path, rows: &[Interval]) -> anyhow::Result<()> {
     write_batch(path, RecordBatch::try_new(schema, cols)?)
 }
 
+/// Read intervals written by `write_intervals`, reversing its encoding.
 pub fn read_intervals(path: &Path) -> anyhow::Result<Vec<Interval>> {
     let mut out = Vec::new();
     for batch in read_batches(path)? {
-        let starts = col_opt_i32(&batch, 3);
-        let ends = col_opt_i32(&batch, 4);
-        let inc_s = col_bool(&batch, 7);
-        let inc_e = col_bool(&batch, 8);
+        let starts = col_opt_i32(&batch, 3, path)?;
+        let ends = col_opt_i32(&batch, 4, path)?;
+        let inc_s = col_bool(&batch, 7, path)?;
+        let inc_e = col_bool(&batch, 8, path)?;
         let c: Vec<Vec<String>> = [0, 1, 2, 5, 6, 9, 10, 11, 12]
-            .map(|i| col_str(&batch, i))
+            .map(|i| col_str(&batch, i, path))
             .into_iter()
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         for r in 0..batch.num_rows() {
             out.push(Interval {
                 interval_id: c[0][r].clone(),
@@ -210,6 +226,8 @@ pub fn read_intervals(path: &Path) -> anyhow::Result<Vec<Interval>> {
     Ok(out)
 }
 
+/// Write provenance to `path`; `value` as a JSON string, `source_statement_id`
+/// as a nullable UTF-8 column.
 pub fn write_provenance(path: &Path, rows: &[Provenance]) -> anyhow::Result<()> {
     let schema = Arc::new(Schema::new(vec![
         utf8("entity_id"),
@@ -238,14 +256,15 @@ pub fn write_provenance(path: &Path, rows: &[Provenance]) -> anyhow::Result<()> 
     write_batch(path, RecordBatch::try_new(schema, cols)?)
 }
 
+/// Read provenance written by `write_provenance`, reversing its encoding.
 pub fn read_provenance(path: &Path) -> anyhow::Result<Vec<Provenance>> {
     let mut out = Vec::new();
     for batch in read_batches(path)? {
-        let stmt = col_opt_str(&batch, 6);
+        let stmt = col_opt_str(&batch, 6, path)?;
         let c: Vec<Vec<String>> = [0, 1, 2, 3, 4, 5, 7]
-            .map(|i| col_str(&batch, i))
+            .map(|i| col_str(&batch, i, path))
             .into_iter()
-            .collect();
+            .collect::<anyhow::Result<Vec<_>>>()?;
         for r in 0..batch.num_rows() {
             out.push(Provenance {
                 entity_id: c[0][r].clone(),
@@ -300,5 +319,66 @@ mod tests {
         let path = tmp.path().join("empty.parquet");
         write_entities(&path, &[]).unwrap();
         assert_eq!(read_entities(&path).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn asymmetric_inclusive_flags_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("intervals.parquet");
+        let iv = Interval {
+            end_inclusive: false,
+            ..caesar_interval()
+        };
+        write_intervals(&path, std::slice::from_ref(&iv)).unwrap();
+        assert_eq!(read_intervals(&path).unwrap(), vec![iv]);
+    }
+
+    #[test]
+    fn provenance_with_statement_id_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("provenance.parquet");
+        let row = Provenance {
+            source_statement_id: Some("Q1048$abc".into()),
+            ..caesar_provenance()
+        };
+        write_provenance(&path, std::slice::from_ref(&row)).unwrap();
+        assert_eq!(read_provenance(&path).unwrap(), vec![row]);
+    }
+
+    #[test]
+    fn bad_enum_string_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bad_enum.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            utf8("entity_id"),
+            utf8("entity_type"),
+            utf8("canonical_name"),
+            utf8("aliases"),
+            utf8("description"),
+            utf8("language"),
+            utf8("source_id"),
+            utf8("source_url"),
+        ]));
+        let col = |v: &str| -> ArrayRef { Arc::new(StringArray::from(vec![v])) };
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                col("wd:Q1"),
+                col("not_a_type"),
+                col("X"),
+                col("[]"),
+                col("d"),
+                col("en"),
+                col("s"),
+                col("u"),
+            ],
+        )
+        .unwrap();
+        write_batch(&path, batch).unwrap();
+        let err = read_entities(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("entity_type"),
+            "unexpected error: {err}"
+        );
     }
 }
