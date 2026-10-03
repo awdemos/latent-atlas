@@ -163,7 +163,9 @@ pub fn normalize_row(
 
 /// curated_roman.csv columns:
 /// entity_id,entity_type,canonical_name,aliases,description,relation,start_year,end_year,confidence,notes
-/// aliases are '|'-separated; empty year = open bound.
+/// aliases are '|'-separated; empty year = open bound. entity_type, relation,
+/// and confidence must all be valid enum strings; invalid values are errors
+/// naming the file and line.
 pub fn parse_curated_csv(path: &Path) -> anyhow::Result<Vec<(Entity, Interval, Vec<Provenance>)>> {
     let mut rdr = csv::Reader::from_path(path)
         .with_context(|| format!("reading curated CSV {}", path.display()))?;
@@ -171,16 +173,29 @@ pub fn parse_curated_csv(path: &Path) -> anyhow::Result<Vec<(Entity, Interval, V
     let mut out = Vec::new();
     for rec in rdr.records() {
         let rec = rec.with_context(|| format!("reading record from {}", path.display()))?;
+        let pos = rec.position().map(|p| p.line()).unwrap_or(0);
         let get = |i: usize| rec.get(i).unwrap_or("").trim();
-        let entity_type = EntityType::from_str(get(1))
-            .ok_or_else(|| anyhow::anyhow!("bad entity_type {:?}", get(1)))?;
-        let relation = Relation::from_str(get(5))
-            .ok_or_else(|| anyhow::anyhow!("bad relation {:?}", get(5)))?;
-        let year = |i: usize| -> anyhow::Result<Option<i32>> {
+        let entity_type = EntityType::from_str(get(1)).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: line {pos}: bad entity_type {:?}",
+                path.display(),
+                get(1)
+            )
+        })?;
+        let relation = Relation::from_str(get(5)).ok_or_else(|| {
+            anyhow::anyhow!("{}: line {pos}: bad relation {:?}", path.display(), get(5))
+        })?;
+        let year = |i: usize, col: &str| -> anyhow::Result<Option<i32>> {
             if get(i).is_empty() {
                 Ok(None)
             } else {
-                Ok(Some(get(i).parse()?))
+                get(i).parse::<i32>().map(Some).map_err(|e| {
+                    anyhow::anyhow!(
+                        "{}: line {pos}: bad {col} {:?}: {e}",
+                        path.display(),
+                        get(i)
+                    )
+                })
             }
         };
         let entity_id = get(0).to_string();
@@ -202,13 +217,19 @@ pub fn parse_curated_csv(path: &Path) -> anyhow::Result<Vec<(Entity, Interval, V
             interval_id: format!("{}:{entity_id}", relation.as_str()),
             entity_id: entity_id.clone(),
             relation,
-            start_year: year(6)?,
-            end_year: year(7)?,
+            start_year: year(6, "start_year")?,
+            end_year: year(7, "end_year")?,
             start_precision: YearPrecision::Year,
             end_precision: YearPrecision::Year,
             start_inclusive: true,
             end_inclusive: true,
-            confidence: Confidence::from_str(get(8)).unwrap_or(Confidence::Medium),
+            confidence: Confidence::from_str(get(8)).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}: line {pos}: bad confidence {:?}",
+                    path.display(),
+                    get(8)
+                )
+            })?,
             date_basis: "curated".into(),
             source_id: format!("curated:{entity_id}"),
             notes: get(9).to_string(),
@@ -227,15 +248,18 @@ pub fn parse_curated_csv(path: &Path) -> anyhow::Result<Vec<(Entity, Interval, V
 }
 
 /// Merge all available raw sources + the curated CSV into canonical tables.
+/// A Wikidata entity can carry multiple date statements producing duplicate
+/// interval_ids; v0 keeps the first deterministically to preserve the
+/// one-interval-per-id invariant downstream joins rely on.
 pub fn normalize_all(
     root: &DatasetRoot,
 ) -> anyhow::Result<(Vec<Entity>, Vec<Interval>, Vec<Provenance>)> {
     let mut entities: BTreeMap<String, Entity> = BTreeMap::new();
-    let mut intervals = Vec::new();
+    let mut intervals: BTreeMap<String, Interval> = BTreeMap::new();
     let mut provenance = Vec::new();
     let mut push = |e: Entity, iv: Interval, prov: Vec<Provenance>| {
         entities.entry(e.entity_id.clone()).or_insert(e);
-        intervals.push(iv);
+        intervals.entry(iv.interval_id.clone()).or_insert(iv);
         provenance.extend(prov);
     };
     for t in [
@@ -262,7 +286,11 @@ pub fn normalize_all(
             push(e, iv, p);
         }
     }
-    Ok((entities.into_values().collect(), intervals, provenance))
+    Ok((
+        entities.into_values().collect(),
+        intervals.into_values().collect(),
+        provenance,
+    ))
 }
 
 #[cfg(test)]
@@ -371,5 +399,90 @@ mod tests {
         assert_eq!(iv.end_year, Some(-26));
         assert_eq!(prov[0].source_name, "curated");
         assert_eq!(rows[1].1.end_year, None);
+    }
+
+    #[test]
+    fn unknown_precision_rows_are_dropped() {
+        // No precision code -> Unknown -> ambiguity window i32::MAX > Decade.
+        let row = raw(
+            "http://www.wikidata.org/entity/Q3",
+            Some("1066-10-14T00:00:00Z"),
+            None,
+            None,
+            None,
+        );
+        assert!(normalize_row(EntityType::Event, &row).is_none());
+    }
+
+    #[test]
+    fn decade_precision_is_kept() {
+        let row = raw(
+            "http://www.wikidata.org/entity/Q4",
+            Some("1066-10-14T00:00:00Z"),
+            Some("8"),
+            None,
+            None,
+        );
+        let (_, iv, _) = normalize_row(EntityType::Event, &row).unwrap();
+        assert_eq!(iv.start_precision, YearPrecision::Decade);
+    }
+
+    #[test]
+    fn coarse_end_precision_drops_row() {
+        let row = raw(
+            "http://www.wikidata.org/entity/Q5",
+            Some("1066-10-14T00:00:00Z"),
+            Some("9"),
+            Some("1067-01-01T00:00:00Z"),
+            Some("7"),
+        );
+        assert!(normalize_row(EntityType::Event, &row).is_none());
+    }
+
+    #[test]
+    fn bad_confidence_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("curated_roman.csv");
+        std::fs::write(
+            &path,
+            concat!(
+                "entity_id,entity_type,canonical_name,aliases,description,relation,start_year,end_year,confidence,notes\n",
+                "curated:x,polity,X,,d,exists,-508,-26,hihg,typo\n",
+            ),
+        )
+        .unwrap();
+        let err = parse_curated_csv(&path).unwrap_err();
+        assert!(err.to_string().contains("bad confidence"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_interval_ids_dedup_first_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = DatasetRoot::new(tmp.path());
+        root.init().unwrap();
+        let line = |birth: &str| {
+            serde_json::json!({
+                "item": "http://www.wikidata.org/entity/Q1048",
+                "label": "X",
+                "description": "d",
+                "start": birth,
+                "start_precision": "9",
+                "retrieved_at": "2026-10-02",
+            })
+        };
+        std::fs::write(
+            root.raw_file("wikidata_people.jsonl"),
+            format!(
+                "{}\n{}\n",
+                line("-0099-07-13T00:00:00Z"),
+                line("-0098-07-13T00:00:00Z")
+            ),
+        )
+        .unwrap();
+        let (entities, intervals, _) = normalize_all(&root).unwrap();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(intervals.len(), 1);
+        // read_ndjson preserves file order; the first row's year survives.
+        assert_eq!(intervals[0].start_year, Some(-99));
     }
 }
