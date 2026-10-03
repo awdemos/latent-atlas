@@ -7,6 +7,7 @@ pub mod normalize;
 pub mod parquet_io;
 pub mod probe;
 pub mod querygen;
+pub mod render;
 pub mod source;
 pub mod splits;
 pub mod store;
