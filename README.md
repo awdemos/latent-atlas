@@ -3,17 +3,27 @@
 **Behavioral cartography for language models** — a product from
 [vibecodingagency](https://vibecodingagency.com/). MIT licensed.
 
-Ask an LLM "Land or Water?" at thousands of coordinates, plot the token
-probabilities, and the continents emerge — sharp coastlines and all — from a
-model that was never shown a map. That was [Karpathy's "land or water?"
-eval](https://x.com/karpathy/status/2105909609487872075), and it reveals
-something deeper than trivia ability: a model's factual knowledge is a
-continuous, fuzzy field, not a lookup table.
+[Karpathy's "land or water?" eval](https://x.com/karpathy/status/2105909609487872075)
+showed that an LLM's geographic knowledge can be *drawn*: ask "Land or Water?"
+at thousands of coordinates, plot the token probabilities, and the continents
+emerge — sharp coastlines and all — from a model that was never shown a map.
+The finding: a model's factual knowledge is not a lookup table but a
+continuous, fuzzy field, recoverable from logits alone.
 
-**Latent Atlas does the same for time.** Probe `P(Julius Caesar was alive |
-year)` with one-token Yes/No queries across thousands of entity × year pairs
-and the model's *implicit timeline of history* takes shape: where eras begin
-and end, how far interval edges blur, and where the model is confidently
+Latent Atlas is that experiment turned into a reusable tool, run on a new
+axis. Every piece of the original has a direct analogue:
+
+| land/water map | Latent Atlas |
+|---|---|
+| sweep latitude/longitude | sweep the year axis |
+| prompt: "Land." or "Water." | prompt: "Yes" or "No" |
+| `P(land \| lat, lon)` | `P(entity active \| entity, year)` |
+| coastline error (pixels) | boundary error (years) |
+| the globe | a timeline of history |
+
+So probing `P(Julius Caesar was alive | year)` across thousands of entity ×
+year pairs reconstructs the model's *implicit timeline of history*: where eras
+begin and end, how far interval edges blur, and where the model is confidently
 wrong. The technique generalizes to any factual claim over controlled
 dimensions — geography, technology availability, software versions, policy
 boundaries — but history comes first, because the ground truth is cleanly
