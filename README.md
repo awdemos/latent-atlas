@@ -3,24 +3,26 @@
 **Behavioral cartography for language models** — a product from
 [vibecodingagency](https://vibecodingagency.com/). MIT licensed.
 
-An LLM's factual knowledge is a continuous, fuzzy internal field, not a lookup
-table.
+Ask an LLM "Land or Water?" at thousands of coordinates, plot the token
+probabilities, and the continents emerge — sharp coastlines and all — from a
+model that was never shown a map. That was [Karpathy's "land or water?"
+eval](https://x.com/karpathy/status/2105909609487872075), and it reveals
+something deeper than trivia ability: a model's factual knowledge is a
+continuous, fuzzy field, not a lookup table.
 
-The inspiration: [Karpathy's "land or water?" eval](https://x.com/karpathy/status/2105909609487872075) —
-ask an LLM "Land or Water?" at thousands of latitude/longitude coordinates,
-plot the token probabilities, and the continents emerge from text alone.
-
-Latent Atlas generalizes the technique to **any kind of factual data**: pick a
-claim type and its controlled input dimensions, probe `P(claim | inputs)` with
-one-token queries, and map where the model is confident, fuzzy, or wrong. The
-first use case is **factual historical events** — it probes
-`P(entity was alive/extant/active | entity, year)` across thousands of queries
-and reconstructs the model's *implicit timeline of history*: era boundaries,
-anachronism blindness, calibration, and all.
+**Latent Atlas does the same for time.** Probe `P(Julius Caesar was alive |
+year)` with one-token Yes/No queries across thousands of entity × year pairs
+and the model's *implicit timeline of history* takes shape: where eras begin
+and end, how far interval edges blur, and where the model is confidently
+wrong. The technique generalizes to any factual claim over controlled
+dimensions — geography, technology availability, software versions, policy
+boundaries — but history comes first, because the ground truth is cleanly
+labelable (birth/death dates, reigns, wars, publications) and a timeline is a
+map a human can judge at a glance.
 
 What you get is not an accuracy score. It's a map: which centuries the model
-locates confidently, where its interval edges blur (measured in *years* of
-drift), and how its confidence compares to reality.
+locates confidently, where its interval edges drift (measured in *years*),
+and how its confidence compares to reality.
 
 ## What it can do
 
