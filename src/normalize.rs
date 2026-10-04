@@ -7,7 +7,7 @@ use crate::store::{DatasetRoot, read_ndjson};
 use crate::types::*;
 use anyhow::Context;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Extract the QID from a Wikidata entity URI
 /// (`http://www.wikidata.org/entity/Q1048` -> `Q1048`).
@@ -273,7 +273,8 @@ pub fn parse_curated_csv(path: &Path) -> anyhow::Result<Vec<(Entity, Interval, V
     Ok(out)
 }
 
-/// Merge all available raw sources + the curated CSV into canonical tables.
+/// Merge all available raw sources + every `curated_*.csv` in `raw/` (sorted
+/// for determinism) into canonical tables.
 /// A Wikidata entity can carry multiple date statements producing duplicate
 /// interval_ids; v0 keeps the first deterministically to preserve the
 /// one-interval-per-id invariant downstream joins rely on.
@@ -306,10 +307,20 @@ pub fn normalize_all(
             }
         }
     }
-    let curated = root.raw_file("curated_roman.csv");
-    if curated.exists() {
-        for (e, iv, p) in parse_curated_csv(&curated)? {
-            push(e, iv, p);
+    let raw_dir = root.raw();
+    if raw_dir.exists() {
+        let mut curated: Vec<PathBuf> = std::fs::read_dir(&raw_dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                p.is_file() && name.starts_with("curated_") && name.ends_with(".csv")
+            })
+            .collect();
+        curated.sort();
+        for path in curated {
+            for (e, iv, p) in parse_curated_csv(&path)? {
+                push(e, iv, p);
+            }
         }
     }
     Ok((
@@ -425,6 +436,32 @@ mod tests {
         assert_eq!(iv.end_year, Some(-26));
         assert_eq!(prov[0].source_name, "curated");
         assert_eq!(rows[1].1.end_year, None);
+    }
+
+    #[test]
+    fn normalize_all_ingests_every_curated_csv() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = DatasetRoot::new(tmp.path());
+        root.init().unwrap();
+        std::fs::write(
+            root.raw_file("curated_roman.csv"),
+            concat!(
+                "entity_id,entity_type,canonical_name,aliases,description,relation,start_year,end_year,confidence,notes\n",
+                "curated:nero,person,Nero,,Roman emperor,alive,37,68,high,\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.raw_file("curated_romans_dprr.csv"),
+            concat!(
+                "entity_id,entity_type,canonical_name,aliases,description,relation,start_year,end_year,confidence,notes\n",
+                "dprr:tullius-29,person,Marcus Tullius Cicero,,Roman statesman,alive,-114,-37,high,\n"
+            ),
+        )
+        .unwrap();
+        let (entities, intervals, _) = normalize_all(&root).unwrap();
+        assert_eq!(entities.len(), 2);
+        assert_eq!(intervals.len(), 2);
     }
 
     #[test]
