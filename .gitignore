@@ -6,3 +6,8 @@ scorecard.png
 docs/superpowers/
 __pycache__/
 .cargo/
+.tmp-ucdp/
+.tmp-edh-raw/
+.tmp-cominhobijn/
+.tmp-snapdrgn/
+.tmp-regesta/

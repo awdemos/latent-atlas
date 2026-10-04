@@ -65,6 +65,32 @@ interval *edges* are near chance — boundary error ±181 years on start dates
 vs ±77 on end dates. It knows Caesar lived in the middle of his life, not
 exactly when he was born.
 
+## Bundled fixtures
+
+Drop any of these into `atlas-data/raw/` (or pass `--data`) and the whole
+pipeline runs on them. Every fixture is reproducible from its source with the
+matching `scripts/*2fixture.py` converter; attribution requirements (COW,
+UCDP, Comin–Hobijn, Regesta Imperii, EDH, endoflife.date) are carried in each
+row's `notes`.
+
+| fixture | rows | relation | source |
+|---|---|---|---|
+| `curated_roman.csv` | 15 | mixed | hand-curated showcase |
+| `curated_romans_dprr.csv` | 2,480 | alive | DPRR prosopography (MRR) |
+| `curated_persons_snapdrgn.csv` | 2,000 | alive | SNAP-DRGN ancient persons |
+| `curated_polities_cow.csv` | 244 | exists | Correlates of War state system |
+| `curated_conflicts_ucdp.csv` | 614 | ongoing | UCDP conflict termination |
+| `curated_works_openlibrary.csv` | 900 | available | Open Library (CC0) |
+| `curated_documents_regesta.csv` | 1,500 | available | Regesta Imperii (CC BY 4.0) |
+| `curated_inscriptions_edh.csv` | 1,500 | available | Epigraphic Database Heidelberg |
+| `curated_tech_adoption_cominhobijn.csv` | 3,000 | available | Comin–Hobijn CHAT panel |
+| `curated_software_endoflife.csv` | 1,000 | active | endoflife.date (CC BY-SA 4.0) |
+| `curated_software_pypi.csv` | 100 | available | PyPI top-100 by downloads |
+
+Together they span 300 BCE to the present: ancient persons and inscriptions,
+medieval charters, modern polities and wars, literature, and two
+software/technology eras for anachronism probes.
+
 ## Install
 
 Requires Rust 1.88+.
