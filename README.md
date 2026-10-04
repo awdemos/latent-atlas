@@ -66,7 +66,10 @@ vs ±77 on end dates. It knows Caesar lived in the middle of his life, not
 exactly when he was born.
 
 Larger run, bundled fixtures, local Ollama (eval sets, 2,752 queries — 244
-COW sovereign states `exists`, PyPI top-100 `available`):
+COW sovereign states `exists`, PyPI top-100 `available`). Full write-up with
+methodology, per-band tables, and the zombie-state analysis:
+[`reports/nimble-cow-pypi-eval1/`](reports/nimble-cow-pypi-eval1/) — written
+to double as a template for your own model evals.
 
 | model | accuracy | AUROC | Brier |
 |---|---|---|---|
