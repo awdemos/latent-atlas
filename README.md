@@ -4,14 +4,19 @@
 [vibecodingagency](https://vibecodingagency.com/). MIT licensed.
 
 An LLM's factual knowledge is a continuous, fuzzy internal field, not a lookup
-table. The original "land or water?" experiment — [Karpathy's "cool
-eval"](https://x.com/karpathy/status/2105909609487872075): ask an LLM "Land or
-Water?" at thousands of latitude/longitude coordinates, plot the token
-probabilities, and the continents emerge. **Latent Atlas does
-the same for time**: it probes `P(entity was alive/extant/active | entity, year)`
-across thousands of one-token queries and reconstructs the model's *implicit
-timeline of human history* — era boundaries, anachronism blindness,
-calibration, and all.
+table.
+
+The inspiration: [Karpathy's "land or water?" eval](https://x.com/karpathy/status/2105909609487872075) —
+ask an LLM "Land or Water?" at thousands of latitude/longitude coordinates,
+plot the token probabilities, and the continents emerge from text alone.
+
+Latent Atlas generalizes the technique to **any kind of factual data**: pick a
+claim type and its controlled input dimensions, probe `P(claim | inputs)` with
+one-token queries, and map where the model is confident, fuzzy, or wrong. The
+first use case is **factual historical events** — it probes
+`P(entity was alive/extant/active | entity, year)` across thousands of queries
+and reconstructs the model's *implicit timeline of history*: era boundaries,
+anachronism blindness, calibration, and all.
 
 What you get is not an accuracy score. It's a map: which centuries the model
 locates confidently, where its interval edges blur (measured in *years* of
