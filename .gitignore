@@ -4,3 +4,5 @@
 .desloppify/
 scorecard.png
 docs/superpowers/
+__pycache__/
+.cargo/
