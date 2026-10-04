@@ -18,8 +18,8 @@ use std::time::Instant;
 /// - `concurrency` must be >= 1 (validated up front; 0 would hang forever).
 /// - Resume dedups on `example_id` only: pointing this at another model's
 ///   response file will skip everything.
-/// - A kill mid-flush can leave a torn last line that `read_ndjson` rejects
-///   on the next resume; truncate the partial line manually and re-run.
+/// - A kill mid-flush can leave a torn final line; resume truncates the
+///   partial tail before appending, so torn lines never become interior.
 pub async fn run_probe(
     client: &dyn ModelClient,
     examples: Vec<Example>,
@@ -30,6 +30,7 @@ pub async fn run_probe(
         concurrency >= 1,
         "concurrency must be >= 1, got {concurrency}"
     );
+    truncate_partial_tail(out_path)?;
     let done: HashSet<String> = if out_path.exists() {
         read_ndjson::<Response>(out_path)?
             .into_iter()
@@ -90,6 +91,27 @@ pub async fn run_probe(
     Ok(written)
 }
 
+/// Drops a partial final line (a file whose last byte is not `\n`) so a
+/// resume appends after complete rows only. No-op for missing or
+/// newline-terminated files.
+fn truncate_partial_tail(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.is_empty() || bytes.ends_with(b"\n") {
+        return Ok(());
+    }
+    let keep = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    std::fs::write(path, &bytes[..keep])
+        .with_context(|| format!("truncating {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,6 +151,22 @@ mod tests {
         let out = tmp.path().join("responses.ndjson");
         let client = MockClient::new("mock-v1");
         run_probe(&client, examples(), &out, 4).await.unwrap();
+        let n = run_probe(&client, examples(), &out, 4).await.unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(read_ndjson::<Response>(&out).unwrap().len(), 16);
+    }
+
+    #[tokio::test]
+    async fn probe_resume_repairs_torn_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("responses.ndjson");
+        let client = MockClient::new("mock-v1");
+        run_probe(&client, examples(), &out, 4).await.unwrap();
+        // simulate a kill mid-flush: a partial line without a trailing newline
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().append(true).open(&out).unwrap();
+        f.write_all(b"{\"partial\":tru").unwrap();
+        drop(f);
         let n = run_probe(&client, examples(), &out, 4).await.unwrap();
         assert_eq!(n, 0);
         assert_eq!(read_ndjson::<Response>(&out).unwrap().len(), 16);

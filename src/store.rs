@@ -3,7 +3,7 @@
 use anyhow::Context;
 use serde::{Serialize, de::DeserializeOwned};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 /// Root directory of a dataset, with the standard layout:
@@ -77,19 +77,28 @@ pub fn write_ndjson<T: Serialize>(path: &Path, rows: &[T]) -> anyhow::Result<()>
 }
 
 /// Reads an NDJSON file. Blank and whitespace-only lines are skipped; parse
-/// errors carry `path:line:` context naming the 1-based offending line.
+/// errors carry `path:line:` context naming the 1-based offending line. A
+/// malformed **unterminated** final line (file not ending in `\n`) is skipped
+/// rather than rejected: append-and-flush writers (e.g. an interrupted probe)
+/// routinely leave a torn last line, and treating it as fatal would make every
+/// interrupted run unreadable. A malformed newline-terminated line — final or
+/// interior — is always an error.
 pub fn read_ndjson<T: DeserializeOwned>(path: &Path) -> anyhow::Result<Vec<T>> {
-    let f = File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let complete = bytes.ends_with(b"\n") || bytes.is_empty();
+    let text = String::from_utf8(bytes).with_context(|| format!("reading {}", path.display()))?;
+    let lines: Vec<&str> = text.lines().collect();
+    let last = lines.len().saturating_sub(1);
     let mut out = Vec::new();
-    for (i, line) in BufReader::new(f).lines().enumerate() {
-        let line = line.with_context(|| format!("reading {}", path.display()))?;
+    for (i, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        out.push(
-            serde_json::from_str(&line)
-                .map_err(|e| anyhow::anyhow!("{}:{}: {e}", path.display(), i + 1))?,
-        );
+        match serde_json::from_str(line) {
+            Ok(v) => out.push(v),
+            Err(_) if i == last && !complete => continue,
+            Err(e) => return Err(anyhow::anyhow!("{}:{}: {e}", path.display(), i + 1)),
+        }
     }
     Ok(out)
 }
@@ -117,6 +126,29 @@ mod tests {
         write_ndjson(&path, &rows).unwrap();
         let back: Vec<serde_json::Value> = read_ndjson(&path).unwrap();
         assert_eq!(back, rows);
+    }
+
+    #[test]
+    fn read_ndjson_skips_torn_final_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rows.ndjson");
+        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n{\"a\":3").unwrap();
+        let back: Vec<serde_json::Value> = read_ndjson(&path).unwrap();
+        assert_eq!(
+            back,
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]
+        );
+    }
+
+    #[test]
+    fn read_ndjson_rejects_interior_bad_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rows.ndjson");
+        std::fs::write(&path, "{\"a\":1}\nnot json\n{\"a\":3}\n").unwrap();
+        let err = read_ndjson::<serde_json::Value>(&path)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(":2:"), "{err}");
     }
 
     #[test]
