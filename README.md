@@ -4,9 +4,10 @@
 [vibecodingagency](https://vibecodingagency.com/). MIT licensed.
 
 An LLM's factual knowledge is a continuous, fuzzy internal field, not a lookup
-table. The original "land or water?" experiment (probe a model with
-"land or water?" at thousands of coordinates, plot the logits) turned token
-probabilities into a map of a model's implicit Earth. **Latent Atlas does
+table. The original "land or water?" experiment — [Karpathy's "cool
+eval"](https://x.com/karpathy/status/2105909609487872075): ask an LLM "Land or
+Water?" at thousands of latitude/longitude coordinates, plot the token
+probabilities, and the continents emerge. **Latent Atlas does
 the same for time**: it probes `P(entity was alive/extant/active | entity, year)`
 across thousands of one-token queries and reconstructs the model's *implicit
 timeline of human history* — era boundaries, anachronism blindness,
