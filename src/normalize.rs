@@ -11,13 +11,13 @@ use std::path::Path;
 
 /// Extract the QID from a Wikidata entity URI
 /// (`http://www.wikidata.org/entity/Q1048` -> `Q1048`).
-pub fn qid_from_uri(uri: &str) -> Option<&str> {
+pub(crate) fn qid_from_uri(uri: &str) -> Option<&str> {
     uri.rsplit('/').next().filter(|s| s.starts_with('Q'))
 }
 
 /// Map a Wikidata timePrecision code (11=day ... 6=millennium) to
 /// [`YearPrecision`]; missing/unparseable codes become `Unknown`.
-pub fn precision_from_code(code: Option<&str>) -> YearPrecision {
+pub(crate) fn precision_from_code(code: Option<&str>) -> YearPrecision {
     match code.and_then(|c| c.parse::<u32>().ok()) {
         Some(11) => YearPrecision::Day,
         Some(10) => YearPrecision::Month,
@@ -74,7 +74,7 @@ const fn entity_type_meta(t: EntityType) -> EntityTypeMeta {
 }
 
 /// The canonical relation each entity type contributes to the dataset.
-pub fn relation_for(t: EntityType) -> Relation {
+pub(crate) fn relation_for(t: EntityType) -> Relation {
     entity_type_meta(t).relation
 }
 
