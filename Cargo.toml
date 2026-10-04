@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Behavioral cartography for language models: temporal-interval benchmarks and latent world-model maps"
+license = "MIT"
+keywords = ["llm", "benchmark", "evals", "interpretability", "wikidata"]
+categories = ["command-line-utilities", "science"]
 
 [dependencies]
 anyhow = "1.0.104"
