@@ -43,6 +43,47 @@ pub enum Relation {
 string_enum!(Relation { Alive => "alive", Ongoing => "ongoing", Exists => "exists",
     Active => "active", Available => "available" });
 
+impl Relation {
+    /// Canonical grouping key for one interval: `relation:subject_id`. An
+    /// entity can carry several relations, each its own interval, so name
+    /// alone is not a key. Shared by metrics (per-interval curves) and
+    /// render (entity curves) so both partition responses identically.
+    pub fn group_key(self, subject_id: &str) -> String {
+        format!("{}:{}", self.as_str(), subject_id)
+    }
+}
+
+/// Which dataset split an example belongs to. `Sweep` rows are the dense
+/// per-year probes feeding curves/heatmaps; the rest are eval rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Split {
+    Train,
+    Dev,
+    Test,
+    Sweep,
+}
+string_enum!(Split { Train => "train", Dev => "dev", Test => "test", Sweep => "sweep" });
+
+/// Stratification band of an eval example's year: where the year sits
+/// relative to the interval bounds (or the whole world axis for fallbacks).
+/// Dense sweep rows use `Sweep` for both band and split.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Band {
+    Interior,
+    NearBefore,
+    NearAfter,
+    FarBefore,
+    FarAfter,
+    EraConfusable,
+    FarFallback,
+    Sweep,
+}
+string_enum!(Band { Interior => "interior", NearBefore => "near_before", NearAfter => "near_after",
+    FarBefore => "far_before", FarAfter => "far_after", EraConfusable => "era_confusable",
+    FarFallback => "far_fallback", Sweep => "sweep" });
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum YearPrecision {
@@ -101,7 +142,10 @@ impl GoldLabel {
             GoldLabel::UnknownOrAmbiguous => "unknown_or_ambiguous",
         }
     }
-    /// 1 iff yes. Unknown rows must be excluded via gold_label, not label_int.
+    /// 1 iff yes. Never a sync authority: `label_int` is a denormalized copy
+    /// of this value, and unknown-labeled rows must be excluded via
+    /// `gold_label` by every consumer (as `compute_report` does), not trusted
+    /// via `label_int`.
     pub fn label_int(self) -> u8 {
         match self {
             GoldLabel::Yes => 1,
@@ -214,16 +258,19 @@ pub struct Example {
     pub year_display: String,
     pub gold_label: GoldLabel,
     /// Deliberate denormalization of `gold_label.label_int()` for flat
-    /// parquet/ML consumers; must stay in sync (enforced by constructors/querygen).
+    /// parquet/ML consumers. There are no constructors enforcing the sync:
+    /// the invariant is by convention at generation sites (querygen sets both
+    /// from one `label_at` call), and every consumer must filter on
+    /// `gold_label` itself, as `compute_report` does.
     pub label_int: u8,
     pub interval_start: Option<i32>,
     pub interval_end: Option<i32>,
-    pub sample_band: String,
+    pub sample_band: Band,
     pub template_id: String,
     pub prompt: String,
     pub source_ids: Vec<String>,
     pub label_confidence: Confidence,
-    pub split: String, // "train" | "dev" | "test" | "sweep"
+    pub split: Split,
 }
 
 /// A probe response: the full example denormalized plus model output,
@@ -369,6 +416,21 @@ mod tests {
         for c in [Confidence::High, Confidence::Medium, Confidence::Low] {
             assert_eq!(Confidence::from_str(c.as_str()), Some(c));
         }
+        for s in [Split::Train, Split::Dev, Split::Test, Split::Sweep] {
+            assert_eq!(Split::from_str(s.as_str()), Some(s));
+        }
+        for b in [
+            Band::Interior,
+            Band::NearBefore,
+            Band::NearAfter,
+            Band::FarBefore,
+            Band::FarAfter,
+            Band::EraConfusable,
+            Band::FarFallback,
+            Band::Sweep,
+        ] {
+            assert_eq!(Band::from_str(b.as_str()), Some(b));
+        }
     }
 
     #[test]
@@ -416,6 +478,27 @@ mod tests {
             );
         }
         for v in [Confidence::High, Confidence::Medium, Confidence::Low] {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
+        }
+        for v in [Split::Train, Split::Dev, Split::Test, Split::Sweep] {
+            assert_eq!(
+                serde_json::to_string(&v).unwrap(),
+                format!("\"{}\"", v.as_str())
+            );
+        }
+        for v in [
+            Band::Interior,
+            Band::NearBefore,
+            Band::NearAfter,
+            Band::FarBefore,
+            Band::FarAfter,
+            Band::EraConfusable,
+            Band::FarFallback,
+            Band::Sweep,
+        ] {
             assert_eq!(
                 serde_json::to_string(&v).unwrap(),
                 format!("\"{}\"", v.as_str())
@@ -501,6 +584,20 @@ pub mod tests_helpers {
             retrieved_at: "2026-10-02".into(),
             source_statement_id: None,
             human_review_status: "unreviewed".into(),
+        }
+    }
+
+    /// Wraps a generated example in a minimal probe `Response` (model "m",
+    /// zero logit diff, no top-logprobs, 1 ms) for tests that only care about
+    /// `p_yes` and the denormalized example fields.
+    pub fn fake_response(example: Example, p_yes: f64) -> Response {
+        Response {
+            p_yes,
+            logit_diff: 0.0,
+            top_logprobs: vec![],
+            model: "m".into(),
+            latency_ms: 1,
+            example,
         }
     }
 }

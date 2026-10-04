@@ -3,7 +3,7 @@
 
 use crate::splits::{example_split, fnv1a64};
 use crate::types::*;
-use crate::year::display_year;
+use crate::year::{PRESENT_YEAR, display_year};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
@@ -31,9 +31,9 @@ impl Default for GenConfig {
         Self {
             near_delta: 10,
             far_before_span: 2000,
-            world_end: 2026,
+            world_end: PRESENT_YEAR,
             sweep_from: -3000,
-            sweep_to: 2026,
+            sweep_to: PRESENT_YEAR,
             sweep_step: 10,
             seed: 0x1a7e47,
         }
@@ -163,7 +163,8 @@ fn seeded_rng(seed: u64, key: &str) -> ChaCha8Rng {
 }
 
 fn jitter(rng: &mut ChaCha8Rng, y: i32, lo: i32, hi: i32) -> i32 {
-    (y + rng.random_range(-2..=2)).clamp(lo, hi)
+    // Compute in i64: y +- 2 overflows i32 for extreme years.
+    (i64::from(y) + i64::from(rng.random_range(-2..=2))).clamp(i64::from(lo), i64::from(hi)) as i32
 }
 
 /// Midpoint of the same-type peer interval nearest to our own midpoint,
@@ -176,17 +177,19 @@ fn era_confusable(iv: &Interval, peers: &[&Interval], world_end: i32) -> Option<
         .iter()
         .filter(|p| p.interval_id != iv.interval_id)
         .filter_map(|p| p.midpoint(world_end).map(|m| (m, p)))
-        .min_by_key(|(m, _)| (m - mid).abs())?;
+        // Distance in i64: (m - mid) overflows i32 for extreme years.
+        .min_by_key(|(m, _)| (i64::from(*m) - i64::from(mid)).abs())?;
     (iv.label_at(peer_mid) == GoldLabel::No).then_some(peer_mid)
 }
 
-fn make_example(iv: &Interval, name: &str, year: i32, band: &str, tpl: &Template) -> Example {
+fn make_example(iv: &Interval, name: &str, year: i32, band: Band, tpl: &Template) -> Example {
     let label = iv.label_at(year);
     Example {
         example_id: format!(
-            "{}:year_{year}:{}:{band}",
+            "{}:year_{year}:{}:{}",
             iv.interval_id.replace(':', "_"),
-            tpl.id
+            tpl.id,
+            band.as_str()
         ),
         task: "temporal_interval".into(),
         relation: iv.relation,
@@ -198,7 +201,7 @@ fn make_example(iv: &Interval, name: &str, year: i32, band: &str, tpl: &Template
         label_int: label.label_int(),
         interval_start: iv.start_year,
         interval_end: iv.end_year,
-        sample_band: band.to_string(),
+        sample_band: band,
         template_id: tpl.id.to_string(),
         prompt: tpl
             .body
@@ -206,7 +209,7 @@ fn make_example(iv: &Interval, name: &str, year: i32, band: &str, tpl: &Template
             .replace("{year_display}", &display_year(year)),
         source_ids: vec![iv.source_id.clone()],
         label_confidence: iv.confidence,
-        split: example_split(&iv.entity_id, tpl.holdout).to_string(),
+        split: example_split(&iv.entity_id, tpl.holdout),
     }
 }
 
@@ -233,69 +236,102 @@ pub fn gen_eval(iv: &Interval, name: &str, peers: &[&Interval], cfg: &GenConfig)
     }
     let templates = templates_for(iv.relation);
     let mut rng = seeded_rng(cfg.seed, &iv.interval_id);
-    let mut dated: Vec<(i32, &str)> = Vec::new();
-    match (iv.start_year, iv.end_year) {
+    let mut dated: Vec<(i32, Band)> = Vec::new();
+    // All band arithmetic runs in i64 (mirroring Interval::label_at /
+    // midpoint): raw i32 subtraction overflows in debug builds for extreme
+    // years, and `f64 as i32` casts saturate instead of panicking.
+    let mut far_fallback_drawn = false;
+    let a = match (iv.start_year, iv.end_year) {
         (Some(a), Some(b)) => {
+            let (a, b) = (i64::from(a), i64::from(b));
             for frac in [0.2f64, 0.5, 0.8] {
-                let y = a + (((b - a) as f64 * frac) as i32);
-                dated.push((jitter(&mut rng, y, a, b), "interior"));
-            }
-            dated.push((rng.random_range((a - cfg.near_delta)..a), "near_before"));
-            dated.push((
-                rng.random_range((b + 1)..=(b + cfg.near_delta)),
-                "near_after",
-            ));
-            dated.push((
-                rng.random_range((a - cfg.far_before_span)..(a - cfg.near_delta)),
-                "far_before",
-            ));
-            if b + cfg.near_delta < cfg.world_end {
+                let y = a + ((b - a) as f64 * frac) as i64;
                 dated.push((
-                    rng.random_range((b + cfg.near_delta + 1)..=cfg.world_end),
-                    "far_after",
+                    jitter(&mut rng, y as i32, a as i32, b as i32),
+                    Band::Interior,
+                ));
+            }
+            dated.push((
+                rng.random_range(a - i64::from(cfg.near_delta)..a) as i32,
+                Band::NearBefore,
+            ));
+            dated.push((
+                rng.random_range(b + 1..=b + i64::from(cfg.near_delta)) as i32,
+                Band::NearAfter,
+            ));
+            dated.push((
+                rng.random_range(a - i64::from(cfg.far_before_span)..a - i64::from(cfg.near_delta))
+                    as i32,
+                Band::FarBefore,
+            ));
+            if b + i64::from(cfg.near_delta) < i64::from(cfg.world_end) {
+                dated.push((
+                    rng.random_range(b + i64::from(cfg.near_delta) + 1..=i64::from(cfg.world_end))
+                        as i32,
+                    Band::FarAfter,
                 ));
             } else {
+                // Closed interval near world_end: no room for far_after, so
+                // the far_fallback draw happens here and the era-confusable
+                // fallback below must not repeat the same year.
+                far_fallback_drawn = true;
                 dated.push((
-                    rng.random_range((a - cfg.far_before_span)..(a - cfg.near_delta)),
-                    "far_fallback",
+                    rng.random_range(
+                        a - i64::from(cfg.far_before_span)..a - i64::from(cfg.near_delta),
+                    ) as i32,
+                    Band::FarFallback,
                 ));
             }
-            match era_confusable(iv, peers, cfg.world_end) {
-                Some(y) => dated.push((y, "era_confusable")),
-                None => dated.push((
-                    rng.random_range((a - cfg.far_before_span)..(a - cfg.near_delta)),
-                    "far_fallback",
-                )),
-            }
+            a
         }
         (Some(a), None) => {
+            let a = i64::from(a);
+            let world_end = i64::from(cfg.world_end);
             for frac in [0.15f64, 0.4, 0.65, 0.9] {
-                let y = a + (((cfg.world_end - a) as f64 * frac) as i32);
-                dated.push((jitter(&mut rng, y, a, cfg.world_end), "interior"));
+                let y = a + ((world_end - a) as f64 * frac) as i64;
+                dated.push((
+                    jitter(&mut rng, y as i32, a as i32, world_end as i32),
+                    Band::Interior,
+                ));
             }
             // Two near_before draws: distinct years/templates, so ids differ.
-            dated.push((rng.random_range((a - cfg.near_delta)..a), "near_before"));
-            dated.push((rng.random_range((a - cfg.near_delta)..a), "near_before"));
             dated.push((
-                rng.random_range((a - cfg.far_before_span)..(a - cfg.near_delta)),
-                "far_before",
+                rng.random_range(a - i64::from(cfg.near_delta)..a) as i32,
+                Band::NearBefore,
             ));
-            match era_confusable(iv, peers, cfg.world_end) {
-                Some(y) => dated.push((y, "era_confusable")),
-                None => dated.push((
-                    rng.random_range((a - cfg.far_before_span)..(a - cfg.near_delta)),
-                    "far_fallback",
-                )),
-            }
+            dated.push((
+                rng.random_range(a - i64::from(cfg.near_delta)..a) as i32,
+                Band::NearBefore,
+            ));
+            dated.push((
+                rng.random_range(a - i64::from(cfg.far_before_span)..a - i64::from(cfg.near_delta))
+                    as i32,
+                Band::FarBefore,
+            ));
+            a
         }
         (None, _) => return vec![],
+    };
+    match era_confusable(iv, peers, cfg.world_end) {
+        Some(y) => dated.push((y, Band::EraConfusable)),
+        None => {
+            let y = rng
+                .random_range(a - i64::from(cfg.far_before_span)..a - i64::from(cfg.near_delta))
+                as i32;
+            // When the closed-interval arm above already drew a far_fallback
+            // (interval near world_end), the two draws sample the same range
+            // and can land on the same year; nudge the second by +1 so the
+            // pair is never identical.
+            let y = if far_fallback_drawn { y + 1 } else { y };
+            dated.push((y, Band::FarFallback));
+        }
     }
     dated
         .iter()
         .enumerate()
         .map(|(i, (y, band))| {
             // Slot suffix keeps ids unique when (template, band, year) collide.
-            let mut ex = make_example(iv, name, *y, band, templates[i % templates.len()]);
+            let mut ex = make_example(iv, name, *y, *band, templates[i % templates.len()]);
             ex.example_id = format!("{}:{i}", ex.example_id);
             ex
         })
@@ -316,8 +352,8 @@ pub fn gen_sweep(iv: &Interval, name: &str, cfg: &GenConfig) -> anyhow::Result<V
     let mut out = Vec::new();
     let mut y = cfg.sweep_from;
     while y <= cfg.sweep_to {
-        let mut ex = make_example(iv, name, y, "sweep", tpl);
-        ex.split = "sweep".into();
+        let mut ex = make_example(iv, name, y, Band::Sweep, tpl);
+        ex.split = Split::Sweep;
         out.push(ex);
         y += cfg.sweep_step;
     }
@@ -465,7 +501,7 @@ mod tests {
         let ex = gen_eval(&iv, "Julius Caesar", &[&peer], &cfg());
         let era = ex
             .iter()
-            .find(|e| e.sample_band == "era_confusable")
+            .find(|e| e.sample_band == Band::EraConfusable)
             .unwrap();
         assert_eq!(era.year_astronomical, (-62 + 14) / 2);
         assert_eq!(era.gold_label, GoldLabel::No);
@@ -481,7 +517,7 @@ mod tests {
                 .find(|t| t.id == e.template_id)
                 .unwrap();
             if t.holdout {
-                assert_eq!(e.split, "test");
+                assert_eq!(e.split, Split::Test);
             }
         }
     }
@@ -493,12 +529,47 @@ mod tests {
         assert_eq!(ex.len(), (2026 + 3000) / 10 + 1);
         assert!(
             ex.iter()
-                .all(|e| e.split == "sweep" && e.sample_band == "sweep")
+                .all(|e| e.split == Split::Sweep && e.sample_band == Band::Sweep)
         );
         assert_eq!(ex[0].year_astronomical, -3000);
         assert_eq!(ex[1].year_astronomical, -2990);
         assert!(ex.iter().any(|e| e.gold_label == GoldLabel::Yes));
         assert!(ex.iter().any(|e| e.gold_label == GoldLabel::No));
+    }
+
+    #[test]
+    fn gen_eval_extreme_years_do_not_panic() {
+        // Band arithmetic is i64 internally: raw i32 subtraction (b - a,
+        // a - near_delta, ...) overflows in debug builds for these bounds.
+        let closed = Interval {
+            start_year: Some(i32::MIN + 50),
+            end_year: Some(i32::MAX - 50),
+            ..caesar_interval()
+        };
+        let ex = gen_eval(&closed, "Deep Time", &[], &cfg());
+        assert_eq!(ex.len(), 8);
+        let open = Interval {
+            start_year: Some(i32::MIN + 50),
+            end_year: None,
+            ..caesar_interval()
+        };
+        assert_eq!(gen_eval(&open, "Deep Time", &[], &cfg()).len(), 8);
+    }
+
+    #[test]
+    fn far_fallback_pair_near_world_end_differs() {
+        // Closed interval with no room for far_after and no era-confusable
+        // peer draws two far_fallback dates; they must not be identical.
+        let mut iv = caesar_interval();
+        iv.end_year = Some(GenConfig::default().world_end - 5);
+        let ex = gen_eval(&iv, "Julius Caesar", &[], &cfg());
+        let years: Vec<i32> = ex
+            .iter()
+            .filter(|e| e.sample_band == Band::FarFallback)
+            .map(|e| e.year_astronomical)
+            .collect();
+        assert_eq!(years.len(), 2, "{ex:?}");
+        assert_ne!(years[0], years[1]);
     }
 
     #[test]
@@ -565,7 +636,7 @@ mod tests {
         iv.end_year = Some(1066);
         let ex = gen_eval(&iv, "Battle of Hastings", &[], &cfg());
         assert_eq!(ex.len(), 8);
-        for e in ex.iter().filter(|e| e.sample_band == "interior") {
+        for e in ex.iter().filter(|e| e.sample_band == Band::Interior) {
             assert_eq!(e.year_astronomical, 1066);
             assert_eq!(e.gold_label, GoldLabel::Yes);
         }
@@ -631,7 +702,7 @@ mod tests {
         let era = |subject: &str, year: i32| {
             out.iter().any(|e| {
                 e.subject_id == subject
-                    && e.sample_band == "era_confusable"
+                    && e.sample_band == Band::EraConfusable
                     && e.year_astronomical == year
             })
         };

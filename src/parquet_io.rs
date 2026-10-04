@@ -2,6 +2,7 @@
 //! Enums are stored as UTF-8 (as_str/from_str); Vec<String> aliases and the
 //! provenance `value` are stored as JSON strings in UTF-8 columns.
 
+use crate::store::ensure_parent;
 use crate::types::{Confidence, Entity, EntityType, Interval, Provenance, Relation, YearPrecision};
 use anyhow::Context;
 use arrow::array::{Array, ArrayRef, BooleanArray, Int32Array, RecordBatch, StringArray};
@@ -21,9 +22,7 @@ fn strs(it: impl Iterator<Item = String>) -> ArrayRef {
 }
 
 fn write_batch(path: &Path, batch: RecordBatch) -> anyhow::Result<()> {
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p).with_context(|| format!("writing {}", path.display()))?;
-    }
+    ensure_parent(path)?;
     let file = File::create(path).with_context(|| format!("writing {}", path.display()))?;
     let mut writer = ArrowWriter::try_new(file, batch.schema(), None)
         .with_context(|| format!("writing {}", path.display()))?;
@@ -46,21 +45,28 @@ fn read_batches(path: &Path) -> anyhow::Result<Vec<RecordBatch>> {
         .with_context(|| format!("reading {}", path.display()))
 }
 
-fn col_str(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<String>> {
-    let a = batch
+/// Downcasts column `i` of `batch` to `T`, erroring with `path`-qualified
+/// context when the physical type differs from what the writer produced.
+fn col<'a, T: Array + 'static>(
+    batch: &'a RecordBatch,
+    i: usize,
+    path: &Path,
+    expect: &str,
+) -> anyhow::Result<&'a T> {
+    batch
         .column(i)
         .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not utf8", path.display()))?;
+        .downcast_ref::<T>()
+        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not {expect}", path.display()))
+}
+
+fn col_str(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<String>> {
+    let a = col::<StringArray>(batch, i, path, "utf8")?;
     Ok((0..a.len()).map(|r| a.value(r).to_string()).collect())
 }
 
 fn col_opt_str(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<Option<String>>> {
-    let a = batch
-        .column(i)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not utf8", path.display()))?;
+    let a = col::<StringArray>(batch, i, path, "utf8")?;
     Ok((0..a.len())
         .map(|r| {
             if a.is_null(r) {
@@ -73,22 +79,14 @@ fn col_opt_str(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec
 }
 
 fn col_opt_i32(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<Option<i32>>> {
-    let a = batch
-        .column(i)
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not i32", path.display()))?;
+    let a = col::<Int32Array>(batch, i, path, "i32")?;
     Ok((0..a.len())
         .map(|r| if a.is_null(r) { None } else { Some(a.value(r)) })
         .collect())
 }
 
 fn col_bool(batch: &RecordBatch, i: usize, path: &Path) -> anyhow::Result<Vec<bool>> {
-    let a = batch
-        .column(i)
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .ok_or_else(|| anyhow::anyhow!("{}: column {i} is not bool", path.display()))?;
+    let a = col::<BooleanArray>(batch, i, path, "bool")?;
     Ok((0..a.len()).map(|r| a.value(r)).collect())
 }
 
@@ -108,14 +106,18 @@ pub fn write_entities(path: &Path, rows: &[Entity]) -> anyhow::Result<()> {
         utf8("source_id"),
         utf8("source_url"),
     ]));
+    let aliases: Vec<String> = rows
+        .iter()
+        .map(|e| {
+            serde_json::to_string(&e.aliases)
+                .with_context(|| format!("serializing aliases of {}", e.entity_id))
+        })
+        .collect::<anyhow::Result<_>>()?;
     let cols: Vec<ArrayRef> = vec![
         strs(rows.iter().map(|e| e.entity_id.clone())),
         strs(rows.iter().map(|e| e.entity_type.as_str().to_string())),
         strs(rows.iter().map(|e| e.canonical_name.clone())),
-        strs(
-            rows.iter()
-                .map(|e| serde_json::to_string(&e.aliases).unwrap()),
-        ),
+        strs(aliases.into_iter()),
         strs(rows.iter().map(|e| e.description.clone())),
         strs(rows.iter().map(|e| e.language.clone())),
         strs(rows.iter().map(|e| e.source_id.clone())),

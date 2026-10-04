@@ -1,7 +1,7 @@
 //! Metrics: never accuracy alone. Sweep-split rows feed boundary/IoU/smoothness
 //! but are excluded from top-line classification metrics.
 
-use crate::types::{GoldLabel, Response};
+use crate::types::{GoldLabel, Response, Split};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -48,13 +48,21 @@ pub fn log_loss(points: &[(f64, u8)]) -> f64 {
 }
 
 /// Rank-based AUROC with average ranks for ties; None when single-class.
+/// Rows with a NaN probability are dropped before ranking: a hand-edited or
+/// partially corrupt response file should degrade the metric, not panic.
 pub fn auroc(points: &[(f64, u8)]) -> Option<f64> {
+    let points: Vec<(f64, u8)> = points
+        .iter()
+        .copied()
+        .filter(|(p, _)| !p.is_nan())
+        .collect();
     let n_pos = points.iter().filter(|(_, y)| *y == 1).count();
     let n_neg = points.len() - n_pos;
     if n_pos == 0 || n_neg == 0 {
         return None;
     }
     let mut idx: Vec<usize> = (0..points.len()).collect();
+    // Only finite values remain, so partial_cmp is total here.
     idx.sort_by(|&i, &j| points[i].0.partial_cmp(&points[j].0).unwrap());
     let mut rank_sum = 0.0;
     let mut i = 0;
@@ -110,8 +118,13 @@ pub fn smoothness(curve: &[(i32, f64)]) -> f64 {
 /// IoU between the predicted-active year span (P>=0.5) and the true interval;
 /// span-based (min/max of predicted-active years); pair with smoothness for
 /// hole detection.
-pub fn interval_iou(curve: &[(i32, f64)], a: i32, b: Option<i32>, world_end: i32) -> f64 {
-    let b = b.unwrap_or(world_end);
+pub fn interval_iou(
+    curve: &[(i32, f64)],
+    true_start: i32,
+    true_end: Option<i32>,
+    world_end: i32,
+) -> f64 {
+    let b = true_end.unwrap_or(world_end);
     let pred: Vec<i32> = curve
         .iter()
         .filter(|(_, p)| *p >= 0.5)
@@ -120,8 +133,8 @@ pub fn interval_iou(curve: &[(i32, f64)], a: i32, b: Option<i32>, world_end: i32
     let (Some(&pa), Some(&pb)) = (pred.iter().min(), pred.iter().max()) else {
         return 0.0;
     };
-    let inter = (pb.min(b) - pa.max(a) + 1).max(0) as f64;
-    let union = (pb.max(b) - pa.min(a) + 1) as f64;
+    let inter = (pb.min(b) - pa.max(true_start) + 1).max(0) as f64;
+    let union = (pb.max(b) - pa.min(true_start) + 1) as f64;
     inter / union
 }
 
@@ -194,7 +207,7 @@ fn group_by<'a>(
 pub fn compute_report(responses: &[Response], world_end: i32) -> MetricsReport {
     let eval: Vec<&Response> = responses
         .iter()
-        .filter(|r| r.example.split != "sweep")
+        .filter(|r| r.example.split != Split::Sweep)
         .collect();
     let model = responses
         .first()
@@ -207,11 +220,7 @@ pub fn compute_report(responses: &[Response], world_end: i32) -> MetricsReport {
     let mut by_interval: BTreeMap<String, Vec<&Response>> = BTreeMap::new();
     for r in responses {
         by_interval
-            .entry(format!(
-                "{}:{}",
-                r.example.relation.as_str(),
-                r.example.subject_id
-            ))
+            .entry(r.example.relation.group_key(&r.example.subject_id))
             .or_default()
             .push(r);
     }
@@ -222,7 +231,7 @@ pub fn compute_report(responses: &[Response], world_end: i32) -> MetricsReport {
             .map(|r| {
                 (
                     r.example.year_astronomical,
-                    r.example.split != "sweep",
+                    r.example.split != Split::Sweep,
                     r.example.example_id.as_str(),
                     r.p_yes,
                 )
@@ -266,8 +275,8 @@ pub fn compute_report(responses: &[Response], world_end: i32) -> MetricsReport {
         model,
         overall: group_metrics(&eval),
         by_relation: group_by(&eval, |r| r.example.relation.as_str().to_string()),
-        by_band: group_by(&eval, |r| r.example.sample_band.clone()),
-        by_split: group_by(&eval, |r| r.example.split.clone()),
+        by_band: group_by(&eval, |r| r.example.sample_band.as_str().to_string()),
+        by_split: group_by(&eval, |r| r.example.split.as_str().to_string()),
         mean_boundary_error_start: mean(&se),
         mean_boundary_error_end: mean(&ee),
         mean_interval_iou: mean(&ious).unwrap_or(0.0),
@@ -297,6 +306,17 @@ mod tests {
         assert_eq!(auroc(&ties), Some(0.5));
         let single_class = vec![(0.9, 1u8), (0.1, 1)];
         assert_eq!(auroc(&single_class), None);
+    }
+
+    #[test]
+    fn auroc_drops_nan_rows_without_panicking() {
+        // A hand-edited response file can contain NaN p_yes; those rows are
+        // excluded from ranking rather than crashing partial_cmp.
+        let pts = vec![(f64::NAN, 1u8), (0.9, 1), (0.8, 1), (0.2, 0), (0.1, 0)];
+        assert_eq!(auroc(&pts), Some(1.0));
+        // all-positive after the NaN drop is single-class -> None
+        let pts = vec![(f64::NAN, 0u8), (0.9, 1), (0.8, 1)];
+        assert_eq!(auroc(&pts), None);
     }
 
     #[test]
@@ -344,18 +364,14 @@ mod tests {
     #[test]
     fn report_excludes_unknown_and_groups() {
         use crate::querygen::{GenConfig, gen_eval};
-        use crate::types::tests_helpers::caesar_interval;
+        use crate::types::tests_helpers::{caesar_interval, fake_response};
         use crate::types::*;
         let cfg = GenConfig::default();
         let mut responses: Vec<Response> = gen_eval(&caesar_interval(), "Julius Caesar", &[], &cfg)
             .into_iter()
-            .map(|example| Response {
-                p_yes: if example.label_int == 1 { 0.9 } else { 0.1 },
-                logit_diff: 0.0,
-                top_logprobs: vec![],
-                model: "m".into(),
-                latency_ms: 1,
-                example,
+            .map(|example| {
+                let p_yes = if example.label_int == 1 { 0.9 } else { 0.1 };
+                fake_response(example, p_yes)
             })
             .collect();
         // force one row unknown to check exclusion
@@ -379,7 +395,7 @@ mod tests {
     #[test]
     fn report_is_deterministic_under_input_order() {
         use crate::querygen::{GenConfig, gen_eval, gen_sweep};
-        use crate::types::tests_helpers::caesar_interval;
+        use crate::types::tests_helpers::{caesar_interval, fake_response};
         use crate::types::*;
         // sweep_step 1 makes the sweep cover every year, so every eval year
         // collides with a sweep row regardless of the RNG-seeded eval years.
@@ -392,14 +408,6 @@ mod tests {
         // year-tie the surviving row changes the curve unless ties break
         // deterministically (sweep wins by construction).
         let in_interval = |y: i32| (-99..=-43).contains(&y);
-        let mk = |ex: Example, p: f64| Response {
-            p_yes: p,
-            logit_diff: 0.0,
-            top_logprobs: vec![],
-            model: "m".into(),
-            latency_ms: 1,
-            example: ex,
-        };
         let sweep: Vec<Response> = gen_sweep(&iv, "Julius Caesar", &cfg)
             .unwrap()
             .into_iter()
@@ -409,7 +417,7 @@ mod tests {
                 } else {
                     0.1
                 };
-                mk(ex, p)
+                fake_response(ex, p)
             })
             .collect();
         let eval: Vec<Response> = gen_eval(&iv, "Julius Caesar", &[], &cfg)
@@ -420,7 +428,7 @@ mod tests {
                 } else {
                     0.2
                 };
-                mk(ex, p)
+                fake_response(ex, p)
             })
             .collect();
         let eval_then_sweep = [eval.clone(), sweep.clone()].concat();
@@ -436,7 +444,7 @@ mod tests {
     #[test]
     fn report_is_deterministic_under_eval_eval_year_ties() {
         use crate::querygen::{GenConfig, gen_eval};
-        use crate::types::tests_helpers::caesar_interval;
+        use crate::types::tests_helpers::{caesar_interval, fake_response};
         use crate::types::*;
         // Point interval: three interior eval rows share the year 1066 under
         // different templates; which row survives the per-year dedup decides
@@ -449,14 +457,7 @@ mod tests {
         let cfg = GenConfig::default();
         let mut eval: Vec<Response> = gen_eval(&iv, "Battle of Hastings", &[], &cfg)
             .into_iter()
-            .map(|example| Response {
-                p_yes: 0.1,
-                logit_diff: 0.0,
-                top_logprobs: vec![],
-                model: "m".into(),
-                latency_ms: 1,
-                example,
-            })
+            .map(|example| fake_response(example, 0.1))
             .collect();
         // The documented tie-break: at a tied year the lexicographically
         // smallest example_id survives dedup. Give exactly that row a
@@ -488,7 +489,7 @@ mod tests {
     #[test]
     fn multi_interval_same_entity_separate_curves() {
         use crate::querygen::{GenConfig, gen_sweep};
-        use crate::types::tests_helpers::caesar_interval;
+        use crate::types::tests_helpers::{caesar_interval, fake_response};
         use crate::types::*;
         let cfg = GenConfig::default();
         // Same entity, second relation with different bounds: one interval
@@ -508,14 +509,8 @@ mod tests {
                 .into_iter()
                 .map(|ex| {
                     let y = ex.year_astronomical;
-                    Response {
-                        p_yes: if (a..=b).contains(&y) { 0.9 } else { 0.1 },
-                        logit_diff: 0.0,
-                        top_logprobs: vec![],
-                        model: "m".into(),
-                        latency_ms: 1,
-                        example: ex,
-                    }
+                    let p_yes = if (a..=b).contains(&y) { 0.9 } else { 0.1 };
+                    fake_response(ex, p_yes)
                 })
                 .collect()
         };

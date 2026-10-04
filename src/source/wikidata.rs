@@ -9,7 +9,7 @@ use crate::types::EntityType;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// WDQS SPARQL endpoint used when no override is configured.
@@ -90,6 +90,57 @@ pub fn parse_time_year(lit: &str) -> Option<i32> {
 
 fn bound<'a>(b: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     b.get(key)?.get("value")?.as_str()
+}
+
+/// Path of the raw-source manifest next to a raw file:
+/// `<raw dir>/source_manifest.json`.
+fn source_manifest_path(raw_path: &Path) -> PathBuf {
+    raw_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("source_manifest.json")
+}
+
+/// Reads the raw-source manifest, treating a missing file as empty.
+/// Errors name the manifest path for both read and parse failures.
+fn read_source_manifest(path: &Path) -> anyhow::Result<serde_json::Value> {
+    if path.exists() {
+        serde_json::from_str(
+            &std::fs::read_to_string(path)
+                .with_context(|| format!("reading {}", path.display()))?,
+        )
+        .with_context(|| format!("parsing {}", path.display()))
+    } else {
+        Ok(serde_json::json!({"sources": []}))
+    }
+}
+
+/// Replaces the entry for `entry["entity_type"]` in the manifest's `sources`
+/// array (there is exactly one entry per type). Errors when the manifest is
+/// not an object with a `sources` array.
+fn merge_into_manifest(
+    manifest: &mut serde_json::Value,
+    entry: serde_json::Value,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let sources = manifest
+        .get_mut("sources")
+        .and_then(|s| s.as_array_mut())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: malformed manifest, expected object with a \"sources\" array",
+                path.display()
+            )
+        })?;
+    sources.retain(|s| s["entity_type"] != entry["entity_type"]);
+    sources.push(entry);
+    Ok(())
+}
+
+fn write_source_manifest(path: &Path, manifest: &serde_json::Value) -> anyhow::Result<()> {
+    std::fs::write(path, serde_json::to_string_pretty(manifest)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// Map a SPARQL JSON response to raw rows. Bindings without an `item` value
@@ -233,19 +284,8 @@ impl SparqlClient {
             tokio::time::sleep(self.min_delay).await;
         }
         // update the raw-source manifest
-        let manifest_path = raw_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("source_manifest.json");
-        let mut manifest: serde_json::Value = if manifest_path.exists() {
-            serde_json::from_str(
-                &std::fs::read_to_string(&manifest_path)
-                    .with_context(|| format!("reading {}", manifest_path.display()))?,
-            )
-            .with_context(|| format!("parsing {}", manifest_path.display()))?
-        } else {
-            serde_json::json!({"sources": []})
-        };
+        let manifest_path = source_manifest_path(raw_path);
+        let mut manifest = read_source_manifest(&manifest_path)?;
         let entry = serde_json::json!({
             "entity_type": entity_type.as_str(),
             "file": raw_path
@@ -255,19 +295,8 @@ impl SparqlClient {
             "rows_total": existing + written,
             "last_fetch": retrieved_at,
         });
-        let sources = manifest
-            .get_mut("sources")
-            .and_then(|s| s.as_array_mut())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{}: malformed manifest, expected object with a \"sources\" array",
-                    manifest_path.display()
-                )
-            })?;
-        sources.retain(|s| s["entity_type"] != entry["entity_type"]);
-        sources.push(entry);
-        std::fs::write(&manifest_path, serde_json::to_string_pretty(&manifest)?)
-            .with_context(|| format!("writing {}", manifest_path.display()))?;
+        merge_into_manifest(&mut manifest, entry, &manifest_path)?;
+        write_source_manifest(&manifest_path, &manifest)?;
         Ok(written)
     }
 }

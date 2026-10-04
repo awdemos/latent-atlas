@@ -2,10 +2,10 @@
 //! Resumable by example_id; bounded concurrency; append-only output.
 
 use crate::model::ModelClient;
-use crate::store::{read_ndjson, truncate_partial_tail};
+use crate::store::{ensure_parent, read_ndjson, truncate_partial_tail};
 use crate::types::{Example, Response};
 use anyhow::Context;
-use futures::StreamExt;
+use futures_util::StreamExt;
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
@@ -46,9 +46,7 @@ pub async fn run_probe(
     if todo.is_empty() {
         return Ok(0);
     }
-    if let Some(p) = out_path.parent() {
-        std::fs::create_dir_all(p).with_context(|| format!("creating {}", p.display()))?;
-    }
+    ensure_parent(out_path)?;
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -58,7 +56,7 @@ pub async fn run_probe(
     let model = client.name().to_string();
     let mut written = 0usize;
 
-    let mut stream = futures::stream::iter(todo.into_iter().map(|ex| async move {
+    let mut stream = futures_util::stream::iter(todo.into_iter().map(|ex| async move {
         let start = Instant::now();
         let score = client.score(&ex).await;
         (ex, score, start.elapsed().as_millis() as u64)

@@ -29,36 +29,62 @@ pub fn precision_from_code(code: Option<&str>) -> YearPrecision {
     }
 }
 
+/// Per-entity-type metadata: the canonical relation it contributes, the
+/// date-basis label for its intervals, and its raw NDJSON file stem. One
+/// table, three accessors — the six entity types are a closed set.
+struct EntityTypeMeta {
+    relation: Relation,
+    date_basis: &'static str,
+    raw_file_stem: &'static str,
+}
+
+const fn entity_type_meta(t: EntityType) -> EntityTypeMeta {
+    match t {
+        EntityType::Person => EntityTypeMeta {
+            relation: Relation::Alive,
+            date_basis: "birth_death",
+            raw_file_stem: "wikidata_people",
+        },
+        EntityType::Event => EntityTypeMeta {
+            relation: Relation::Ongoing,
+            date_basis: "start_end",
+            raw_file_stem: "wikidata_events",
+        },
+        EntityType::Polity => EntityTypeMeta {
+            relation: Relation::Exists,
+            date_basis: "inception_dissolution",
+            raw_file_stem: "wikidata_polities",
+        },
+        EntityType::Organization => EntityTypeMeta {
+            relation: Relation::Active,
+            date_basis: "inception_dissolution",
+            raw_file_stem: "wikidata_organizations",
+        },
+        EntityType::Work => EntityTypeMeta {
+            relation: Relation::Available,
+            date_basis: "publication",
+            raw_file_stem: "wikidata_works",
+        },
+        EntityType::Technology => EntityTypeMeta {
+            relation: Relation::Available,
+            date_basis: "publication",
+            raw_file_stem: "wikidata_technologies",
+        },
+    }
+}
+
 /// The canonical relation each entity type contributes to the dataset.
 pub fn relation_for(t: EntityType) -> Relation {
-    match t {
-        EntityType::Person => Relation::Alive,
-        EntityType::Event => Relation::Ongoing,
-        EntityType::Polity => Relation::Exists,
-        EntityType::Organization => Relation::Active,
-        EntityType::Work | EntityType::Technology => Relation::Available,
-    }
+    entity_type_meta(t).relation
 }
 
 fn date_basis_for(t: EntityType) -> &'static str {
-    match t {
-        EntityType::Person => "birth_death",
-        EntityType::Event => "start_end",
-        EntityType::Polity | EntityType::Organization => "inception_dissolution",
-        EntityType::Work | EntityType::Technology => "publication",
-    }
+    entity_type_meta(t).date_basis
 }
 
-/// Raw NDJSON file stem for an entity type, matching `fetch`'s output names.
+/// Raw NDJSON file stem for an entity type, matching `fetch_all`'s output names.
 pub fn raw_file_stem(t: EntityType) -> &'static str {
-    match t {
-        EntityType::Person => "wikidata_people",
-        EntityType::Event => "wikidata_events",
-        EntityType::Polity => "wikidata_polities",
-        EntityType::Organization => "wikidata_organizations",
-        EntityType::Work => "wikidata_works",
-        EntityType::Technology => "wikidata_technologies",
-    }
+    entity_type_meta(t).raw_file_stem
 }
 
 fn provenance(

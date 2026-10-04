@@ -1,10 +1,21 @@
 //! Dataset-root layout and NDJSON I/O.
 
+use crate::types::Response;
 use anyhow::Context;
 use serde::{Serialize, de::DeserializeOwned};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+
+/// Creates the parent directory of `path` when missing; no-op when `path`
+/// has no parent. Used by every writer so callers can hand over nested paths
+/// without pre-creating directories.
+pub(crate) fn ensure_parent(path: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    Ok(())
+}
 
 /// Root directory of a dataset, with the standard layout:
 /// `raw/`, `canonical/`, `splits/`, `generated/`, `runs/`.
@@ -64,9 +75,7 @@ impl DatasetRoot {
 /// Writes `rows` as NDJSON: one trailing-newline-terminated JSON value per
 /// line. Parent directories of `path` are created automatically.
 pub fn write_ndjson<T: Serialize>(path: &Path, rows: &[T]) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-    }
+    ensure_parent(path)?;
     let mut w =
         BufWriter::new(File::create(path).with_context(|| format!("creating {}", path.display()))?);
     for row in rows {
@@ -74,6 +83,34 @@ pub fn write_ndjson<T: Serialize>(path: &Path, rows: &[T]) -> anyhow::Result<()>
         w.write_all(b"\n")?;
     }
     Ok(())
+}
+
+/// Read every `*.ndjson` response file under a run directory; bails when the
+/// directory holds none. Files are read in sorted-name order and responses
+/// are deduped by `example_id` (first occurrence wins): a re-probe can append
+/// a second file containing examples already scored, and counting them twice
+/// would skew every metric.
+pub fn read_run_responses(run: &Path) -> anyhow::Result<Vec<Response>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(run)
+        .with_context(|| format!("reading {}", run.display()))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    paths.sort();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for path in paths {
+        if path.extension().and_then(|e| e.to_str()) == Some("ndjson") {
+            for r in read_ndjson::<Response>(&path)? {
+                if seen.insert(r.example.example_id.clone()) {
+                    out.push(r);
+                }
+            }
+        }
+    }
+    if out.is_empty() {
+        anyhow::bail!("no responses under {}", run.display());
+    }
+    Ok(out)
 }
 
 /// Reads an NDJSON file. Blank and whitespace-only lines are skipped; parse
@@ -248,5 +285,38 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains(":2:"), "error should name line 2: {err}");
+    }
+
+    #[test]
+    fn read_run_responses_dedups_across_files() {
+        // A re-probe appends a second file to the run dir; an example probed
+        // twice (e.g. partial wipe + redo) must be counted once. First
+        // occurrence wins per sorted-file order.
+        let tmp = tempfile::tempdir().unwrap();
+        let run = tmp.path().join("runs/mock");
+        std::fs::create_dir_all(&run).unwrap();
+        let example = crate::querygen::gen_eval(
+            &crate::types::tests_helpers::caesar_interval(),
+            "Julius Caesar",
+            &[],
+            &crate::querygen::GenConfig::default(),
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let r = crate::types::tests_helpers::fake_response(example, 0.9);
+        write_ndjson(&run.join("a.responses.ndjson"), std::slice::from_ref(&r)).unwrap();
+        write_ndjson(&run.join("b.responses.ndjson"), &[r]).unwrap();
+        let rows = read_run_responses(&run).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].p_yes, 0.9); // first file wins
+    }
+
+    #[test]
+    fn read_run_responses_bails_without_ndjson() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = tmp.path().join("runs/empty");
+        std::fs::create_dir_all(&run).unwrap();
+        assert!(read_run_responses(&run).is_err());
     }
 }

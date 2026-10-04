@@ -1,6 +1,11 @@
 //! Astronomical year numbering: 1 BCE = 0, 2 BCE = -1, 100 BCE = -99.
 //! Internal i32 is always astronomical; prompts use BCE/CE display strings.
 
+/// Single source for the present-day epoch. Anything that needs "now" as a
+/// year (default `GenConfig::world_end`, score/render boundary fallbacks)
+/// derives it from here so the whole pipeline agrees on one value.
+pub const PRESENT_YEAR: i32 = 2026;
+
 /// Formats an astronomical year as a BCE/CE display string.
 /// Years <= 0 map to `1 - y` BCE (0 → "1 BCE", -99 → "100 BCE").
 pub fn display_year(y: i32) -> String {

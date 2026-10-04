@@ -2,7 +2,8 @@
 //! boundary-error histogram, calibration plot.
 
 use crate::metrics::boundary_error;
-use crate::types::{GoldLabel, Relation, Response};
+use crate::store::ensure_parent;
+use crate::types::{GoldLabel, Relation, Response, Split};
 use anyhow::Context;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,11 +28,7 @@ pub fn curves_from_responses(responses: &[Response]) -> Vec<EntityCurve> {
     let mut by_entity: BTreeMap<String, Vec<&Response>> = BTreeMap::new();
     for r in responses {
         by_entity
-            .entry(format!(
-                "{}:{}",
-                r.example.relation.as_str(),
-                r.example.subject_id
-            ))
+            .entry(r.example.relation.group_key(&r.example.subject_id))
             .or_default()
             .push(r);
     }
@@ -95,10 +92,7 @@ pub fn heatmap_png(curves: &[EntityCurve], path: &Path) -> anyhow::Result<()> {
         let p = sample(&curves[y as usize].curve, years[x as usize]);
         image::Rgb(color(p))
     });
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
+    ensure_parent(path)?;
     img.save(path)
         .with_context(|| format!("saving {}", path.display()))?;
     Ok(())
@@ -108,6 +102,14 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// Writes an SVG artifact: creates the parent directory when missing and
+/// writes `svg` to `path`.
+fn write_svg(path: &Path, svg: &str) -> anyhow::Result<()> {
+    ensure_parent(path)?;
+    std::fs::write(path, svg).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// Render one curve as an SVG: title, true-interval band, year axis with
@@ -166,12 +168,7 @@ pub fn curve_svg(ec: &EntityCurve, world: (i32, i32), path: &Path) -> anyhow::Re
         pts.join(" ")
     ));
     svg.push_str("</svg>");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, svg).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    write_svg(path, &svg)
 }
 
 /// Render labeled count buckets as a bar-chart SVG.
@@ -205,12 +202,7 @@ pub fn histogram_svg(title: &str, buckets: &[(String, usize)], path: &Path) -> a
         ));
     }
     svg.push_str("</svg>");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, svg).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    write_svg(path, &svg)
 }
 
 /// Render a calibration plot: 10 predicted-probability bins as (mean
@@ -257,12 +249,7 @@ pub fn calibration_svg(points: &[(f64, u8)], path: &Path) -> anyhow::Result<()> 
         ));
     }
     svg.push_str("</svg>");
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
-    }
-    std::fs::write(path, svg).with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    write_svg(path, &svg)
 }
 
 fn sanitize(name: &str) -> String {
@@ -272,17 +259,20 @@ fn sanitize(name: &str) -> String {
 }
 
 /// Render all score maps for a run. Sweep responses feed the heatmap/curves;
-/// eval responses feed calibration. Returns written paths.
+/// eval responses feed calibration. `world_end` substitutes for a missing end
+/// bound in boundary-error histograms and should match the `GenConfig` used
+/// at generation time. Returns written paths.
 pub fn render_run(
     responses: &[Response],
     out_dir: &Path,
     max_curves: usize,
+    world_end: i32,
 ) -> anyhow::Result<Vec<PathBuf>> {
     std::fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
     let mut written = vec![];
     let sweep: Vec<Response> = responses
         .iter()
-        .filter(|r| r.example.split == "sweep")
+        .filter(|r| r.example.split == Split::Sweep)
         .cloned()
         .collect();
     let curve_source: &[Response] = if sweep.is_empty() { responses } else { &sweep };
@@ -317,7 +307,7 @@ pub fn render_run(
     let mut buckets: BTreeMap<&str, usize> = BTreeMap::new();
     for ec in &curves {
         let Some(a) = ec.interval_start else { continue };
-        if let Some((se, _)) = boundary_error(&ec.curve, a, ec.interval_end, 2026) {
+        if let Some((se, _)) = boundary_error(&ec.curve, a, ec.interval_end, world_end) {
             let label = match se {
                 0..=10 => "0-10",
                 11..=25 => "11-25",
@@ -340,7 +330,7 @@ pub fn render_run(
     let pts: Vec<(f64, u8)> = responses
         .iter()
         .filter(|r| {
-            r.example.split != "sweep" && r.example.gold_label != GoldLabel::UnknownOrAmbiguous
+            r.example.split != Split::Sweep && r.example.gold_label != GoldLabel::UnknownOrAmbiguous
         })
         .map(|r| (r.p_yes, r.example.label_int))
         .collect();
@@ -357,7 +347,7 @@ mod tests {
     #![allow(clippy::float_cmp)] // exact values are deterministic on these inputs
     use super::*;
     use crate::querygen::{GenConfig, gen_sweep};
-    use crate::types::tests_helpers::caesar_interval;
+    use crate::types::tests_helpers::{caesar_interval, fake_response};
     use crate::types::*;
 
     fn fake_responses() -> Vec<Response> {
@@ -365,13 +355,9 @@ mod tests {
         gen_sweep(&iv, "Julius Caesar", &GenConfig::default())
             .unwrap()
             .into_iter()
-            .map(|example| Response {
-                p_yes: if example.label_int == 1 { 0.9 } else { 0.1 },
-                logit_diff: 0.0,
-                top_logprobs: vec![],
-                model: "m".into(),
-                latency_ms: 1,
-                example,
+            .map(|example| {
+                let p_yes = if example.label_int == 1 { 0.9 } else { 0.1 };
+                fake_response(example, p_yes)
             })
             .collect()
     }
@@ -433,16 +419,9 @@ mod tests {
         let responses: Vec<Response> = gen_sweep(&iv, "Battle of Hastings", &cfg)
             .unwrap()
             .into_iter()
-            .map(|example| Response {
-                p_yes: 0.9,
-                logit_diff: 0.0,
-                top_logprobs: vec![],
-                model: "m".into(),
-                latency_ms: 1,
-                example,
-            })
+            .map(|example| fake_response(example, 0.9))
             .collect();
-        render_run(&responses, tmp.path(), 5).unwrap();
+        render_run(&responses, tmp.path(), 5, GenConfig::default().world_end).unwrap();
         let svg = std::fs::read_to_string(
             tmp.path()
                 .join("curve_Battle_of_Hastings_alive_wd_Q1048.svg"),
@@ -465,7 +444,13 @@ mod tests {
     #[test]
     fn render_run_emits_artifacts() {
         let tmp = tempfile::tempdir().unwrap();
-        let written = render_run(&fake_responses(), tmp.path(), 5).unwrap();
+        let written = render_run(
+            &fake_responses(),
+            tmp.path(),
+            5,
+            GenConfig::default().world_end,
+        )
+        .unwrap();
         let names: Vec<String> = written
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into())
