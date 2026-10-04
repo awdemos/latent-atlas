@@ -2,7 +2,7 @@
 //! Resumable by example_id; bounded concurrency; append-only output.
 
 use crate::model::ModelClient;
-use crate::store::read_ndjson;
+use crate::store::{read_ndjson, truncate_partial_tail};
 use crate::types::{Example, Response};
 use anyhow::Context;
 use futures::StreamExt;
@@ -89,27 +89,6 @@ pub async fn run_probe(
     file.flush()
         .with_context(|| format!("flushing {}", out_path.display()))?;
     Ok(written)
-}
-
-/// Drops a partial final line (a file whose last byte is not `\n`) so a
-/// resume appends after complete rows only. No-op for missing or
-/// newline-terminated files.
-fn truncate_partial_tail(path: &Path) -> anyhow::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    if bytes.is_empty() || bytes.ends_with(b"\n") {
-        return Ok(());
-    }
-    let keep = bytes
-        .iter()
-        .rposition(|b| *b == b'\n')
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    std::fs::write(path, &bytes[..keep])
-        .with_context(|| format!("truncating {}", path.display()))?;
-    Ok(())
 }
 
 #[cfg(test)]

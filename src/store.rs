@@ -103,6 +103,30 @@ pub fn read_ndjson<T: DeserializeOwned>(path: &Path) -> anyhow::Result<Vec<T>> {
     Ok(out)
 }
 
+/// Drops a partial final line (a file whose last byte is not `\n`) so a
+/// resume that counts rows and then appends starts after complete rows only.
+/// Without this, the counting read silently skips the torn line while the
+/// append welds the first new row onto its bytes, producing a malformed
+/// *interior* line that subsequent reads hard-error on. No-op for missing or
+/// newline-terminated files.
+pub(crate) fn truncate_partial_tail(path: &Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    if bytes.is_empty() || bytes.ends_with(b"\n") {
+        return Ok(());
+    }
+    let keep = bytes
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    std::fs::write(path, &bytes[..keep])
+        .with_context(|| format!("truncating {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +195,48 @@ mod tests {
             back,
             vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]
         );
+    }
+
+    #[test]
+    fn truncate_partial_tail_makes_torn_file_resumable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rows.ndjson");
+        std::fs::write(&path, "{\"a\":1}\n{\"a\":2}\n{\"a\":3").unwrap();
+        truncate_partial_tail(&path).unwrap();
+        let back: Vec<serde_json::Value> = read_ndjson(&path).unwrap();
+        assert_eq!(
+            back,
+            vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})]
+        );
+        // A row appended after truncation lands on its own complete line,
+        // never welded onto torn bytes as a malformed interior line.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        use std::io::Write;
+        f.write_all(b"{\"a\":3}\n").unwrap();
+        drop(f);
+        let back: Vec<serde_json::Value> = read_ndjson(&path).unwrap();
+        assert_eq!(
+            back,
+            vec![
+                serde_json::json!({"a": 1}),
+                serde_json::json!({"a": 2}),
+                serde_json::json!({"a": 3})
+            ]
+        );
+    }
+
+    #[test]
+    fn truncate_partial_tail_is_noop_on_complete_or_missing_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("rows.ndjson");
+        truncate_partial_tail(&path).unwrap(); // missing file
+        std::fs::write(&path, "{\"a\":1}\n").unwrap();
+        truncate_partial_tail(&path).unwrap(); // newline-terminated
+        let back: Vec<serde_json::Value> = read_ndjson(&path).unwrap();
+        assert_eq!(back, vec![serde_json::json!({"a": 1})]);
     }
 
     #[test]

@@ -115,7 +115,12 @@ fn xml_escape(s: &str) -> String {
 pub fn curve_svg(ec: &EntityCurve, world: (i32, i32), path: &Path) -> anyhow::Result<()> {
     let (w, h) = (800.0f64, 240.0f64);
     let (pl, pr, pt, pb) = (50.0, 20.0, 30.0, 34.0);
-    let (y0, y1) = world;
+    // A single-year world would divide by zero below (every x = NaN); widen
+    // by a year so the degenerate range still renders sane axes.
+    let (y0, y1) = match world {
+        (y0, y1) if y0 == y1 => (y0 - 1, y1 + 1),
+        world => world,
+    };
     let x = |year: i32| pl + (year - y0) as f64 / (y1 - y0) as f64 * (w - pl - pr);
     let yv = |p: f64| pt + (1.0 - p) * (h - pt - pb);
     let mut svg = format!(
@@ -358,6 +363,7 @@ mod tests {
     fn fake_responses() -> Vec<Response> {
         let iv = caesar_interval();
         gen_sweep(&iv, "Julius Caesar", &GenConfig::default())
+            .unwrap()
             .into_iter()
             .map(|example| Response {
                 p_yes: if example.label_int == 1 { 0.9 } else { 0.1 },
@@ -406,6 +412,43 @@ mod tests {
         let svg = std::fs::read_to_string(&path).unwrap();
         assert!(svg.contains("<polyline"));
         assert!(svg.contains("Julius Caesar"));
+    }
+
+    #[test]
+    fn curve_svg_single_year_range_has_no_nan() {
+        // All responses on one year: y0 == y1 divided by zero and every x
+        // coordinate became NaN. The range is widened by a year instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let iv = Interval {
+            start_year: Some(1066),
+            end_year: Some(1066),
+            ..caesar_interval()
+        };
+        let cfg = GenConfig {
+            sweep_from: 1066,
+            sweep_to: 1066,
+            sweep_step: 1,
+            ..GenConfig::default()
+        };
+        let responses: Vec<Response> = gen_sweep(&iv, "Battle of Hastings", &cfg)
+            .unwrap()
+            .into_iter()
+            .map(|example| Response {
+                p_yes: 0.9,
+                logit_diff: 0.0,
+                top_logprobs: vec![],
+                model: "m".into(),
+                latency_ms: 1,
+                example,
+            })
+            .collect();
+        render_run(&responses, tmp.path(), 5).unwrap();
+        let svg = std::fs::read_to_string(
+            tmp.path()
+                .join("curve_Battle_of_Hastings_alive_wd_Q1048.svg"),
+        )
+        .unwrap();
+        assert!(!svg.contains("NaN"), "svg has NaN coordinates");
     }
 
     #[test]

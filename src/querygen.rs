@@ -214,11 +214,20 @@ fn make_example(iv: &Interval, name: &str, year: i32, band: &str, tpl: &Template
 /// bands around the bounds, plus one era-confusable (or far fallback) date.
 /// Open-ended intervals reallocate the after-bands into interior and
 /// near_before. Empty for intervals with no start bound; inverted
-/// intervals (start > end, which `normalize` does not reject) also yield
-/// no examples rather than panicking in `jitter`'s clamp.
+/// intervals (start > end, which `normalize` does not reject) and open-ended
+/// intervals starting at/after `world_end` (e.g. future release dates) also
+/// yield no examples rather than panicking in `jitter`'s clamp.
 pub fn gen_eval(iv: &Interval, name: &str, peers: &[&Interval], cfg: &GenConfig) -> Vec<Example> {
     if let (Some(a), Some(b)) = (iv.start_year, iv.end_year)
         && a > b
+    {
+        return vec![];
+    }
+    // Open-ended interval starting at/after world_end (e.g. a future release
+    // date): the interior-year jitter would clamp against min > max and
+    // panic, and every interior year is outside the world anyway. Skip.
+    if let (Some(a), None) = (iv.start_year, iv.end_year)
+        && a >= cfg.world_end
     {
         return vec![];
     }
@@ -295,7 +304,14 @@ pub fn gen_eval(iv: &Interval, name: &str, peers: &[&Interval], cfg: &GenConfig)
 
 /// Dense sweep across the whole axis at `cfg.sweep_step`, all in the
 /// "sweep" split/band, using the relation's first (non-holdout) template.
-pub fn gen_sweep(iv: &Interval, name: &str, cfg: &GenConfig) -> Vec<Example> {
+/// `sweep_step` must be >= 1: 0 would loop forever on the `<=` guard and
+/// negative steps stride away from `sweep_to`.
+pub fn gen_sweep(iv: &Interval, name: &str, cfg: &GenConfig) -> anyhow::Result<Vec<Example>> {
+    anyhow::ensure!(
+        cfg.sweep_step >= 1,
+        "sweep_step must be >= 1, got {}",
+        cfg.sweep_step
+    );
     let tpl = templates_for(iv.relation)[0];
     let mut out = Vec::new();
     let mut y = cfg.sweep_from;
@@ -305,18 +321,19 @@ pub fn gen_sweep(iv: &Interval, name: &str, cfg: &GenConfig) -> Vec<Example> {
         out.push(ex);
         y += cfg.sweep_step;
     }
-    out
+    Ok(out)
 }
 
 /// Generate for every interval. Peers for era-confusable sampling are chosen
 /// among entities of the same entity_type; peer lists are built once per
-/// type and skipped entirely in Sweep mode (gen_sweep ignores peers).
+/// type and skipped entirely in Sweep mode (gen_sweep ignores peers). Errors
+/// when `cfg.sweep_step < 1` in Sweep mode (see [`gen_sweep`]).
 pub fn generate(
     entities: &[Entity],
     intervals: &[Interval],
     cfg: &GenConfig,
     mode: GenMode,
-) -> Vec<Example> {
+) -> anyhow::Result<Vec<Example>> {
     use std::collections::HashMap;
     let by_id: HashMap<&str, &Entity> =
         entities.iter().map(|e| (e.entity_id.as_str(), e)).collect();
@@ -349,10 +366,10 @@ pub fn generate(
                     .unwrap_or(&[]);
                 out.extend(gen_eval(iv, &entity.canonical_name, peers, cfg));
             }
-            GenMode::Sweep => out.extend(gen_sweep(iv, &entity.canonical_name, cfg)),
+            GenMode::Sweep => out.extend(gen_sweep(iv, &entity.canonical_name, cfg)?),
         }
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -472,7 +489,7 @@ mod tests {
     #[test]
     fn sweep_covers_axis_with_sweep_split() {
         let iv = caesar_interval();
-        let ex = gen_sweep(&iv, "Julius Caesar", &cfg());
+        let ex = gen_sweep(&iv, "Julius Caesar", &cfg()).unwrap();
         assert_eq!(ex.len(), (2026 + 3000) / 10 + 1);
         assert!(
             ex.iter()
@@ -482,6 +499,24 @@ mod tests {
         assert_eq!(ex[1].year_astronomical, -2990);
         assert!(ex.iter().any(|e| e.gold_label == GoldLabel::Yes));
         assert!(ex.iter().any(|e| e.gold_label == GoldLabel::No));
+    }
+
+    #[test]
+    fn sweep_rejects_nonpositive_step() {
+        // step 0 would loop forever on `while y <= cfg.sweep_to`; negative
+        // steps walk away from sweep_to. Both must error, not hang.
+        let iv = caesar_interval();
+        for step in [0, -10] {
+            let cfg = GenConfig {
+                sweep_step: step,
+                ..GenConfig::default()
+            };
+            let err = gen_sweep(&iv, "Julius Caesar", &cfg).unwrap_err();
+            assert!(
+                err.to_string().contains("sweep_step"),
+                "unexpected error: {err}"
+            );
+        }
     }
 
     #[test]
@@ -500,6 +535,25 @@ mod tests {
         iv.start_year = Some(-43);
         iv.end_year = Some(-99);
         assert!(gen_eval(&iv, "Julius Caesar", &[], &cfg()).is_empty());
+    }
+
+    #[test]
+    fn open_ended_starting_at_or_after_world_end_yields_no_examples() {
+        // Real Wikidata data has future release dates: an open-ended interval
+        // whose start is at/past world_end would panic in jitter's clamp
+        // (min > max). Such intervals yield no examples instead.
+        let cfg = cfg();
+        for start in [cfg.world_end, cfg.world_end + 4] {
+            let iv = Interval {
+                start_year: Some(start),
+                end_year: None,
+                ..caesar_interval()
+            };
+            assert!(
+                gen_eval(&iv, "Future Film", &[], &cfg).is_empty(),
+                "start {start} must be skipped"
+            );
+        }
     }
 
     #[test]
@@ -571,7 +625,7 @@ mod tests {
 
         let entities = [caesar, augustus, aeneid];
         let intervals = [caesar_iv, augustus_iv, aeneid_iv, orphan_iv];
-        let out = generate(&entities, &intervals, &cfg(), GenMode::Eval);
+        let out = generate(&entities, &intervals, &cfg(), GenMode::Eval).unwrap();
         assert!(out.iter().all(|e| e.subject_id != "wd:Q999"));
         assert_eq!(out.len(), 24); // 3 resolvable intervals * 8
         let era = |subject: &str, year: i32| {

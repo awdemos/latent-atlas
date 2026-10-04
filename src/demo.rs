@@ -10,13 +10,25 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 /// Read every `*.ndjson` response file under a run directory; bails when the
-/// directory holds none.
+/// directory holds none. Files are read in sorted-name order and responses
+/// are deduped by `example_id` (first occurrence wins): a re-probe can append
+/// a second file containing examples already scored, and counting them twice
+/// would skew every metric.
 pub fn read_run_responses(run: &Path) -> anyhow::Result<Vec<Response>> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(run)
+        .with_context(|| format!("reading {}", run.display()))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<Result<_, _>>()?;
+    paths.sort();
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(run).with_context(|| format!("reading {}", run.display()))? {
-        let path = entry?.path();
+    for path in paths {
         if path.extension().and_then(|e| e.to_str()) == Some("ndjson") {
-            out.extend(store::read_ndjson::<Response>(&path)?);
+            for r in store::read_ndjson::<Response>(&path)? {
+                if seen.insert(r.example.example_id.clone()) {
+                    out.push(r);
+                }
+            }
         }
     }
     if out.is_empty() {
@@ -50,7 +62,7 @@ pub async fn run_demo(
             .cloned()
             .collect();
         for (mode, suffix) in [(GenMode::Eval, ""), (GenMode::Sweep, "_sweep")] {
-            let examples = querygen::generate(&entities, &ivs, &cfg, mode);
+            let examples = querygen::generate(&entities, &ivs, &cfg, mode)?;
             let path = root
                 .generated()
                 .join(format!("{}_yesno{suffix}.ndjson", r.as_str()));
@@ -81,4 +93,55 @@ pub async fn run_demo(
         .with_context(|| format!("writing {}", metrics_path.display()))?;
     let written = render::render_run(&responses, &run.join("score_maps"), 25)?;
     Ok((report, written))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::querygen::{GenConfig, gen_eval};
+    use crate::types::tests_helpers::caesar_interval;
+
+    fn response(p_yes: f64) -> Response {
+        let example = gen_eval(
+            &caesar_interval(),
+            "Julius Caesar",
+            &[],
+            &GenConfig::default(),
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        Response {
+            p_yes,
+            logit_diff: 0.0,
+            top_logprobs: vec![],
+            model: "m".into(),
+            latency_ms: 1,
+            example,
+        }
+    }
+
+    #[test]
+    fn read_run_responses_dedups_across_files() {
+        // A re-probe appends a second file to the run dir; an example probed
+        // twice (e.g. partial wipe + redo) must be counted once. First
+        // occurrence wins per sorted-file order.
+        let tmp = tempfile::tempdir().unwrap();
+        let run = tmp.path().join("runs/mock");
+        std::fs::create_dir_all(&run).unwrap();
+        let r = response(0.9);
+        store::write_ndjson(&run.join("a.responses.ndjson"), std::slice::from_ref(&r)).unwrap();
+        store::write_ndjson(&run.join("b.responses.ndjson"), &[r]).unwrap();
+        let rows = read_run_responses(&run).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].p_yes, 0.9); // first file wins
+    }
+
+    #[test]
+    fn read_run_responses_bails_without_ndjson() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = tmp.path().join("runs/empty");
+        std::fs::create_dir_all(&run).unwrap();
+        assert!(read_run_responses(&run).is_err());
+    }
 }

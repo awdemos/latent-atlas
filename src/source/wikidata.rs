@@ -189,6 +189,11 @@ impl SparqlClient {
         limit: usize,
         raw_path: &Path,
     ) -> anyhow::Result<usize> {
+        // An interrupted prior fetch may have left a torn final line: drop it
+        // before counting, or the count silently skips it while the append
+        // welds the first new row onto its bytes (a malformed interior line
+        // that then hard-errors on every read).
+        crate::store::truncate_partial_tail(raw_path)?;
         let existing = if raw_path.exists() {
             read_ndjson::<RawRow>(raw_path)?.len()
         } else {
@@ -335,6 +340,44 @@ mod tests {
     fn query_work_and_technology_have_no_end_property() {
         assert!(!entity_query(EntityType::Work, 0, 10).contains("OPTIONAL"));
         assert!(!entity_query(EntityType::Technology, 0, 10).contains("OPTIONAL"));
+    }
+
+    #[test]
+    fn fetch_resume_prologue_truncates_torn_tail_before_counting() {
+        // fetch_all resumes by counting existing rows, then appends. Without
+        // truncation a torn final line would be skipped by the count but then
+        // welded onto the first new row as a malformed interior line. Pin the
+        // prologue composition: truncate, count, append, re-read.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("persons_raw.ndjson");
+        let row = |item: &str| RawRow {
+            item: item.into(),
+            label: String::new(),
+            description: String::new(),
+            start: None,
+            start_precision: None,
+            end: None,
+            end_precision: None,
+            retrieved_at: "2026-10-03".into(),
+        };
+        let mut bytes = serde_json::to_string(&row("wd:Q1")).unwrap();
+        bytes.push('\n');
+        bytes.push_str("{\"item\":\"wd:Q2\",\"retr"); // interrupted mid-row
+        std::fs::write(&path, bytes).unwrap();
+        crate::store::truncate_partial_tail(&path).unwrap();
+        let existing = read_ndjson::<RawRow>(&path).unwrap().len();
+        assert_eq!(existing, 1);
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        serde_json::to_writer(&mut f, &row("wd:Q2")).unwrap();
+        f.write_all(b"\n").unwrap();
+        drop(f);
+        let rows = read_ndjson::<RawRow>(&path).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].item, "wd:Q2");
     }
 
     #[test]

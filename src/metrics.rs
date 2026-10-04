@@ -217,23 +217,27 @@ pub fn compute_report(responses: &[Response], world_end: i32) -> MetricsReport {
     }
     let (mut se, mut ee, mut ious, mut smooth) = (vec![], vec![], vec![], vec![]);
     for rs in by_interval.values() {
-        let mut curve: Vec<(i32, bool, f64)> = rs
+        let mut curve: Vec<(i32, bool, &str, f64)> = rs
             .iter()
             .map(|r| {
                 (
                     r.example.year_astronomical,
                     r.example.split != "sweep",
+                    r.example.example_id.as_str(),
                     r.p_yes,
                 )
             })
             .collect();
         // Sweep rows win year-ties by construction: (year, is_eval) sorts
-        // sweep rows before eval rows at equal years (false < true), and the
-        // stable sort + dedup keeps the first row at each year regardless of
-        // probe output order.
-        curve.sort_by_key(|(y, is_eval, _)| (*y, *is_eval));
-        curve.dedup_by_key(|(y, _, _)| *y);
-        let curve: Vec<(i32, f64)> = curve.into_iter().map(|(y, _, p)| (y, p)).collect();
+        // sweep rows before eval rows at equal years (false < true). Remaining
+        // eval-eval ties break on example_id, so the surviving row is
+        // data-dependent, not probe completion order — buffer_unordered makes
+        // that order nondeterministic, and an input-order-dependent survivor
+        // would flip IoU for identical data. The stable sort + dedup keeps
+        // the first row at each year regardless of probe output order.
+        curve.sort_by_key(|(y, is_eval, id, _)| (*y, *is_eval, *id));
+        curve.dedup_by_key(|(y, _, _, _)| *y);
+        let curve: Vec<(i32, f64)> = curve.into_iter().map(|(y, _, _, p)| (y, p)).collect();
         let first = rs[0];
         let (Some(a), b) = (first.example.interval_start, first.example.interval_end) else {
             continue;
@@ -397,6 +401,7 @@ mod tests {
             example: ex,
         };
         let sweep: Vec<Response> = gen_sweep(&iv, "Julius Caesar", &cfg)
+            .unwrap()
             .into_iter()
             .map(|ex| {
                 let p = if in_interval(ex.year_astronomical) {
@@ -429,6 +434,58 @@ mod tests {
     }
 
     #[test]
+    fn report_is_deterministic_under_eval_eval_year_ties() {
+        use crate::querygen::{GenConfig, gen_eval};
+        use crate::types::tests_helpers::caesar_interval;
+        use crate::types::*;
+        // Point interval: three interior eval rows share the year 1066 under
+        // different templates; which row survives the per-year dedup decides
+        // IoU (1.0 vs 0.0), so input order must not matter.
+        let iv = Interval {
+            start_year: Some(1066),
+            end_year: Some(1066),
+            ..caesar_interval()
+        };
+        let cfg = GenConfig::default();
+        let mut eval: Vec<Response> = gen_eval(&iv, "Battle of Hastings", &[], &cfg)
+            .into_iter()
+            .map(|example| Response {
+                p_yes: 0.1,
+                logit_diff: 0.0,
+                top_logprobs: vec![],
+                model: "m".into(),
+                latency_ms: 1,
+                example,
+            })
+            .collect();
+        // The documented tie-break: at a tied year the lexicographically
+        // smallest example_id survives dedup. Give exactly that row a
+        // crossing p so IoU is 1.0 iff the tie-break holds.
+        let mut tied: Vec<&str> = eval
+            .iter()
+            .filter(|r| r.example.year_astronomical == 1066)
+            .map(|r| r.example.example_id.as_str())
+            .collect();
+        tied.sort();
+        let winner = tied[0].to_string();
+        for r in &mut eval {
+            if r.example.example_id == winner {
+                r.p_yes = 0.9;
+            }
+        }
+        let mut reversed = eval.clone();
+        reversed.reverse();
+        let r1 = compute_report(&eval, 2026);
+        let r2 = compute_report(&reversed, 2026);
+        assert_eq!(r1.mean_interval_iou, r2.mean_interval_iou);
+        assert_eq!(r1.mean_smoothness, r2.mean_smoothness);
+        assert_eq!(r1.mean_boundary_error_start, r2.mean_boundary_error_start);
+        assert_eq!(r1.mean_boundary_error_end, r2.mean_boundary_error_end);
+        // Deterministic survivor: the smallest example_id at the tied year.
+        assert_eq!(r1.mean_interval_iou, 1.0);
+    }
+
+    #[test]
     fn multi_interval_same_entity_separate_curves() {
         use crate::querygen::{GenConfig, gen_sweep};
         use crate::types::tests_helpers::caesar_interval;
@@ -447,6 +504,7 @@ mod tests {
         let sweep_responses = |iv: &Interval| -> Vec<Response> {
             let (a, b) = (iv.start_year.unwrap(), iv.end_year.unwrap());
             gen_sweep(iv, "Julius Caesar", &cfg)
+                .unwrap()
                 .into_iter()
                 .map(|ex| {
                     let y = ex.year_astronomical;

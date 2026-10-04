@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
                 if ivs.is_empty() {
                     continue;
                 }
-                let examples = querygen::generate(&entities, &ivs, &GenConfig::default(), mode);
+                let examples = querygen::generate(&entities, &ivs, &GenConfig::default(), mode)?;
                 let suffix = if mode == GenMode::Sweep { "_sweep" } else { "" };
                 let path = root
                     .generated()

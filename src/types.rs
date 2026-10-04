@@ -149,13 +149,17 @@ impl Interval {
     /// on EITHER side of that bound, including years strictly inside the
     /// interval. Bounds are always treated as inclusive in v0.
     pub fn label_at(&self, year: i32) -> GoldLabel {
+        // Distances are computed in i64: (year - bound) overflows i32 for
+        // extreme years (e.g. a = i32::MIN, year positive).
         if let Some(a) = self.start_year
-            && (year - a).abs() < self.start_precision.ambiguity_window()
+            && (i64::from(year) - i64::from(a)).abs()
+                < i64::from(self.start_precision.ambiguity_window())
         {
             return GoldLabel::UnknownOrAmbiguous;
         }
         if let Some(b) = self.end_year
-            && (year - b).abs() < self.end_precision.ambiguity_window()
+            && (i64::from(year) - i64::from(b)).abs()
+                < i64::from(self.end_precision.ambiguity_window())
         {
             return GoldLabel::UnknownOrAmbiguous;
         }
@@ -278,6 +282,29 @@ mod tests {
             ..caesar_interval()
         };
         assert_eq!(iv.label_at(-59), GoldLabel::UnknownOrAmbiguous);
+    }
+
+    #[test]
+    fn label_at_extreme_years_does_not_overflow() {
+        // (year - a) in i32 overflows for extremes; the distance must be
+        // computed in i64. Window 0 precision, so no ambiguity is triggered
+        // and plain interval membership decides.
+        let iv = Interval {
+            start_year: Some(i32::MIN),
+            end_year: None,
+            ..caesar_interval()
+        };
+        assert_eq!(iv.label_at(i32::MAX), GoldLabel::Yes);
+        let bounded = Interval {
+            end_year: Some(i32::MAX),
+            ..iv.clone()
+        };
+        assert_eq!(bounded.label_at(i32::MAX), GoldLabel::Yes);
+        let ended = Interval {
+            end_year: Some(0),
+            ..iv
+        };
+        assert_eq!(ended.label_at(i32::MAX), GoldLabel::No);
     }
 
     #[test]
