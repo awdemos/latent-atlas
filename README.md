@@ -65,6 +65,26 @@ interval *edges* are near chance — boundary error ±181 years on start dates
 vs ±77 on end dates. It knows Caesar lived in the middle of his life, not
 exactly when he was born.
 
+Larger run, bundled fixtures, local Ollama (eval sets, 2,752 queries — 244
+COW sovereign states `exists`, PyPI top-100 `available`):
+
+| model | accuracy | AUROC | Brier |
+|---|---|---|---|
+| nimble (9B) | 0.729 | 0.873 | 0.180 |
+| ternary-bonsai (1.7B) | 0.662 | 0.745 | 0.210 |
+
+nimble knows the modern map cold — 98% accuracy on years when a state clearly
+exists — but **dead polities never die**: asked about states dissolved in
+1861–1945 (Tuscany, Bavaria, Austria-Hungary, historical Germany), it keeps
+answering "yes, it exists" in 2025 with high confidence (~20% accuracy after
+dissolution, vs 98% inside the interval). Once a state enters the world
+model, it never leaves — the heatmap shows sharp left edges and no right
+edges. The 1.7B model has the opposite failure: it leans "No" everywhere
+(only 63% yes *inside* intervals, near-perfect "no" before 1816), so it gets
+dissolutions right by default rather than by knowledge. PyPI packages behave
+sanely for both (nimble 0.81), confirming these are polity-representation
+biases, not generic yes/no priors.
+
 ## Bundled fixtures
 
 Drop any of these into `atlas-data/raw/` (or pass `--data`) and the whole
