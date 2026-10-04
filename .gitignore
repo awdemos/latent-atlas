@@ -1,3 +1,5 @@
 .worktrees/
 /target
 /atlas-data
+.desloppify/
+scorecard.png
