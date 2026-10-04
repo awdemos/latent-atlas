@@ -186,8 +186,8 @@ markers through to labels instead of faking exact years.
 **Is this interpretability?** It's behavioral cartography: a systematic probe
 of model *outputs* along controlled input dimensions. It does not read
 activations, and a sharp coastline does not mean the model "stores a map" —
-it means the behavior is spatially coherent. See the caveats in
-`docs/superpowers/specs/2026-10-02-latent-atlas-design.md`.
+it means the behavior is spatially coherent. The maps are evidence about
+behavior, not photographs of internal representations.
 
 ## For AI agents
 
@@ -196,7 +196,7 @@ this repo, here is everything you need.
 
 **What this repo is**: a Rust workspace (lib `latent_atlas` + binary `atlas`)
 implementing a temporal-interval probing pipeline. 17 modules in `src/`,
-one integration test in `tests/`, plans/specs in `docs/superpowers/`.
+one integration test in `tests/`.
 
 **Setup**: `cargo build --release` (Rust 1.88+). No services, no databases,
 no API keys needed for tests or the mock demo.
