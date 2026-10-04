@@ -1,8 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use latent_atlas::model::{MockClient, ModelClient, OpenAiClient};
 use latent_atlas::querygen::{GenConfig, GenMode};
-use latent_atlas::types::{Entity, EntityType, Example, Interval, Relation, Split};
-use latent_atlas::{DatasetRoot, normalize, parquet_io, probe, querygen, render, splits, store};
+use latent_atlas::types::{Entity, EntityType, Example, Relation, Split};
+use latent_atlas::{DatasetRoot, demo, normalize, parquet_io, probe, render, splits, store};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
@@ -147,26 +146,12 @@ async fn main() -> anyhow::Result<()> {
                 ],
             };
             for r in relations {
-                let ivs: Vec<Interval> = intervals
-                    .iter()
-                    .filter(|i| i.relation == r)
-                    .cloned()
-                    .collect();
-                if ivs.is_empty() {
+                let Some((path, n)) =
+                    demo::generate_for_relation(&root, &entities, &intervals, r, mode)?
+                else {
                     continue;
-                }
-                let examples = querygen::generate(&entities, &ivs, &GenConfig::default(), mode)?;
-                let suffix = if mode == GenMode::Sweep { "_sweep" } else { "" };
-                let path = root
-                    .generated()
-                    .join(format!("{}_yesno{suffix}.ndjson", r.as_str()));
-                store::write_ndjson(&path, &examples)?;
-                println!(
-                    "{}: {} examples -> {}",
-                    r.as_str(),
-                    examples.len(),
-                    path.display()
-                );
+                };
+                println!("{}: {} examples -> {}", r.as_str(), n, path.display());
             }
         }
         Cmd::Split => {
@@ -193,12 +178,11 @@ async fn main() -> anyhow::Result<()> {
             concurrency,
         } => {
             let examples: Vec<Example> = store::read_ndjson(&input)?;
-            let client: Box<dyn ModelClient> = if mock {
-                Box::new(MockClient::new(model.unwrap_or_else(|| "mock".into())))
-            } else {
-                Box::new(OpenAiClient::from_env(model)?)
-            };
-            let stem = input.file_stem().unwrap().to_string_lossy();
+            let client = demo::select_client(model, mock, "mock")?;
+            let stem = input
+                .file_stem()
+                .ok_or_else(|| anyhow::anyhow!("{}: no file stem", input.display()))?
+                .to_string_lossy();
             let out = root
                 .run_dir(client.name())
                 .join(format!("{stem}.responses.ndjson"));
@@ -233,7 +217,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Demo { mock } => {
-            let (report, written) = latent_atlas::demo::run_demo(&root, mock).await?;
+            let (report, written) = demo::run_demo(&root, mock).await?;
             println!("\nDemo complete.");
             println!("  accuracy: {:.3}", report.overall.accuracy);
             println!("  interval IoU: {:.3}", report.mean_interval_iou);

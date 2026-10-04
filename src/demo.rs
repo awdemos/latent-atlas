@@ -9,6 +9,54 @@ use querygen::{GenConfig, GenMode};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+/// Builds the model client for a run, shared by the CLI Probe/Demo commands
+/// and [`run_demo`]: a deterministic `MockClient` when `mock` (named
+/// `mock_name`, overridable via `model`), else the OpenAI-compatible client
+/// from env/CLI flags.
+pub fn select_client(
+    model: Option<String>,
+    mock: bool,
+    mock_name: &str,
+) -> anyhow::Result<Box<dyn ModelClient>> {
+    if mock {
+        Ok(Box::new(MockClient::new(
+            model.unwrap_or_else(|| mock_name.into()),
+        )))
+    } else {
+        Ok(Box::new(OpenAiClient::from_env(model)?))
+    }
+}
+
+/// Generates examples for one relation and writes them to
+/// `generated/{relation}_yesno{suffix}.ndjson` (suffix `_sweep` in Sweep
+/// mode), creating parent directories. Uses `GenConfig::default()`, like
+/// both generation call sites. Returns `None` without writing anything when
+/// no intervals carry `relation` (callers skip); otherwise the written path
+/// and the example count.
+pub fn generate_for_relation(
+    root: &DatasetRoot,
+    entities: &[Entity],
+    intervals: &[Interval],
+    relation: Relation,
+    mode: GenMode,
+) -> anyhow::Result<Option<(PathBuf, usize)>> {
+    let ivs: Vec<Interval> = intervals
+        .iter()
+        .filter(|i| i.relation == relation)
+        .cloned()
+        .collect();
+    if ivs.is_empty() {
+        return Ok(None);
+    }
+    let examples = querygen::generate(entities, &ivs, &GenConfig::default(), mode)?;
+    let suffix = if mode == GenMode::Sweep { "_sweep" } else { "" };
+    let path = root
+        .generated()
+        .join(format!("{}_yesno{suffix}.ndjson", relation.as_str()));
+    store::write_ndjson(&path, &examples)?;
+    Ok(Some((path, examples.len())))
+}
+
 /// Run the whole pipeline over [`crate::fixtures::demo_entities`]: canonical
 /// parquet, eval+sweep queries per relation, probe (mock or OpenAI-compatible
 /// per `mock`), metrics, and score maps. Returns the report and the rendered
@@ -28,29 +76,20 @@ pub async fn run_demo(
     let relations: BTreeSet<Relation> = intervals.iter().map(|i| i.relation).collect();
     let mut inputs = Vec::new();
     for r in relations {
-        let ivs: Vec<Interval> = intervals
-            .iter()
-            .filter(|i| i.relation == r)
-            .cloned()
-            .collect();
-        for (mode, suffix) in [(GenMode::Eval, ""), (GenMode::Sweep, "_sweep")] {
-            let examples = querygen::generate(&entities, &ivs, &cfg, mode)?;
-            let path = root
-                .generated()
-                .join(format!("{}_yesno{suffix}.ndjson", r.as_str()));
-            store::write_ndjson(&path, &examples)?;
-            inputs.push(path);
+        for mode in [GenMode::Eval, GenMode::Sweep] {
+            if let Some((path, _)) = generate_for_relation(root, &entities, &intervals, r, mode)? {
+                inputs.push(path);
+            }
         }
     }
 
-    let client: Box<dyn ModelClient> = if mock {
-        Box::new(MockClient::new("mock-atlas-v1"))
-    } else {
-        Box::new(OpenAiClient::from_env(None)?)
-    };
+    let client = select_client(None, mock, "mock-atlas-v1")?;
     for input in &inputs {
         let examples = store::read_ndjson(input)?;
-        let stem = input.file_stem().unwrap().to_string_lossy();
+        let stem = input
+            .file_stem()
+            .ok_or_else(|| anyhow::anyhow!("{}: no file stem", input.display()))?
+            .to_string_lossy();
         let out = root
             .run_dir(client.name())
             .join(format!("{stem}.responses.ndjson"));
